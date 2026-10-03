@@ -2,6 +2,7 @@ package ui
 
 import (
 	"claude-squad/keys"
+	"fmt"
 	"strings"
 
 	"claude-squad/session"
@@ -48,6 +49,9 @@ type Menu struct {
 	state         MenuState
 	instance      *session.Instance
 	activeTab     int
+	relayMode     string
+	relayCount    int
+	relayMax      int
 
 	// keyDown is the key which is pressed. The default is -1.
 	keyDown keys.KeyName
@@ -63,7 +67,15 @@ func NewMenu() *Menu {
 		state:     StateEmpty,
 		activeTab: 0,
 		keyDown:   -1,
+		relayMode: "MANUAL",
 	}
+}
+
+// SetRelayStatus updates the relay mode indicator shown above the key menu.
+func (m *Menu) SetRelayStatus(mode string, count, max int) {
+	m.relayMode = mode
+	m.relayCount = count
+	m.relayMax = max
 }
 
 func (m *Menu) Keydown(name keys.KeyName) {
@@ -131,7 +143,7 @@ func (m *Menu) addInstanceOptions() {
 	options := []keys.KeyName{keys.KeyNew, keys.KeyKill}
 
 	// Action group
-	actionGroup := []keys.KeyName{keys.KeyEnter, keys.KeySubmit}
+	actionGroup := []keys.KeyName{keys.KeyEnter, keys.KeySubmit, keys.KeyRelay}
 	if m.instance.Status == session.Paused {
 		actionGroup = append(actionGroup, keys.KeyResume)
 	} else {
@@ -144,7 +156,7 @@ func (m *Menu) addInstanceOptions() {
 	}
 
 	// System group
-	systemGroup := []keys.KeyName{keys.KeyTab, keys.KeyHelp, keys.KeyQuit}
+	systemGroup := []keys.KeyName{keys.KeyTab, keys.KeyRelayMode, keys.KeyHelp, keys.KeyQuit}
 
 	// Combine all groups
 	options = append(options, actionGroup...)
@@ -167,9 +179,12 @@ func (m *Menu) String() string {
 		start int
 		end   int
 	}{
-		{0, 2}, // Instance management group (n, d)
-		{2, 5}, // Action group (enter, submit, pause/resume)
-		{6, 8}, // System group (tab, help, q)
+		{0, 2},  // Instance management group (n, d)
+		{2, 6},  // Action group (enter, submit, relay, pause/resume)
+		{6, 10}, // System group (tab, relay mode, help, q)
+	}
+	if m.state == StateEmpty {
+		groups = []struct{ start, end int }{{0, 2}, {2, len(m.options)}}
 	}
 
 	for i, k := range m.options {
@@ -222,6 +237,14 @@ func (m *Menu) String() string {
 		}
 	}
 
-	centeredMenuText := menuStyle.Render(s.String())
+	relayStatus := fmt.Sprintf("Relay: %s", m.relayMode)
+	if m.relayMode == "AUTO" {
+		relayStatus = fmt.Sprintf("Relay: AUTO %d/%d", m.relayCount, m.relayMax)
+	}
+	centeredMenuText := lipgloss.JoinVertical(
+		lipgloss.Center,
+		menuStyle.Render(relayStatus),
+		menuStyle.Render(s.String()),
+	)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, centeredMenuText)
 }

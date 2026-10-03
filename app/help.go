@@ -53,6 +53,10 @@ func (h helpTypeGeneral) toContent() string {
 		keyStyle.Render("c")+descStyle.Render("         - Checkout: commit changes and pause session"),
 		keyStyle.Render("r")+descStyle.Render("         - Resume a paused session"),
 		"",
+		headerStyle.Render("Relay (one Claude Code + one Codex session):"),
+		keyStyle.Render("R")+descStyle.Render("         - Send the selected agent's latest reply to its peer"),
+		keyStyle.Render("A")+descStyle.Render("         - Toggle MANUAL/AUTO Relay mode (AUTO stops after 6 messages)"),
+		"",
 		headerStyle.Render("Other:"),
 		keyStyle.Render("tab")+descStyle.Render("       - Switch between preview, diff, and terminal tabs"),
 		keyStyle.Render("shift-↓/↑")+descStyle.Render(" - Scroll in preview/diff/terminal view"),
@@ -79,6 +83,7 @@ func (h helpTypeInstanceStart) toContent() string {
 		headerStyle.Render("Handoff:"),
 		keyStyle.Render("c")+descStyle.Render("     - Checkout this instance's branch"),
 		keyStyle.Render("p")+descStyle.Render("     - Push branch to GitHub to create a PR"),
+		keyStyle.Render("R")+descStyle.Render("     - Relay this agent's latest reply to its peer"),
 	)
 	return content
 }

@@ -103,6 +103,8 @@ The menu at the bottom of the screen shows available commands:
 - `s` - Commit and push branch to github
 - `c` - Checkout. Commits changes and pauses the session
 - `r` - Resume a paused session
+- `R` - Relay the selected Claude Code/Codex session's latest reply to the other running session
+- `A` - Toggle Relay between `MANUAL` and `AUTO`
 - `?` - Show help menu
 
 ##### Navigation
@@ -139,6 +141,16 @@ Each profile has two fields:
 | `program` | Shell command used to launch the agent for that profile  |
 
 If no profiles are defined, Claude Squad uses `default_program` directly as the launch command (the default is `claude`).
+
+### Claude Code ↔ Codex Relay
+
+Relay uses the existing tmux sessions and requires exactly one running Claude Code session and one running Codex session. It never starts a new agent process.
+
+- `MANUAL` (default): select the source session and press `R`. Its latest rendered reply is sent to the peer with a source header.
+- `AUTO`: press `A` to enable it. A Claude Code reply containing `@codex` sends only the text after that tag to Codex; a Codex reply containing `@claude` does the reverse.
+- AUTO Relay stops and returns to MANUAL after 6 forwarded messages. Pressing `A` again starts a fresh 6-message limit.
+
+The current mode and AUTO counter are displayed in the footer as `Relay: MANUAL` or `Relay: AUTO n/6`.
 
 ### FAQs
 

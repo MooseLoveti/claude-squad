@@ -77,6 +77,11 @@ type home struct {
 	// keySent is used to manage underlining menu items
 	keySent bool
 
+	// Relay state is intentionally in-memory and limited to the two running agents.
+	relayMode      relayMode
+	autoRelayCount int
+	autoRelaySeen  map[*session.Instance][32]byte
+
 	// instanceStarting is true while a background instance start is in progress.
 	// Prevents double-submission and guards against interacting with a not-yet-started instance.
 	instanceStarting bool
@@ -118,19 +123,22 @@ func newHome(ctx context.Context, program string, autoYes bool) *home {
 	}
 
 	h := &home{
-		ctx:          ctx,
-		spinner:      spinner.New(spinner.WithSpinner(spinner.MiniDot)),
-		menu:         ui.NewMenu(),
-		tabbedWindow: ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewDiffPane(), ui.NewTerminalPane()),
-		errBox:       ui.NewErrBox(),
-		storage:      storage,
-		appConfig:    appConfig,
-		program:      program,
-		autoYes:      autoYes,
-		state:        stateDefault,
-		appState:     appState,
+		ctx:           ctx,
+		spinner:       spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		menu:          ui.NewMenu(),
+		tabbedWindow:  ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewDiffPane(), ui.NewTerminalPane()),
+		errBox:        ui.NewErrBox(),
+		storage:       storage,
+		appConfig:     appConfig,
+		program:       program,
+		autoYes:       autoYes,
+		state:         stateDefault,
+		appState:      appState,
+		relayMode:     relayManual,
+		autoRelaySeen: make(map[*session.Instance][32]byte),
 	}
 	h.list = ui.NewList(&h.spinner, autoYes)
+	h.updateRelayMenu()
 
 	// Load saved instances
 	instances, err := storage.LoadInstances()
@@ -189,7 +197,7 @@ func (m *home) Init() tea.Cmd {
 			time.Sleep(100 * time.Millisecond)
 			return previewTickMsg{}
 		},
-		tickUpdateMetadataCmd(m.snapshotActiveInstances(), m.list.GetSelectedInstance()),
+		tickUpdateMetadataCmd(m.snapshotActiveInstances(), m.list.GetSelectedInstance(), m.relayMode == relayAuto),
 	)
 }
 
@@ -257,7 +265,11 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				r.instance.SetDiffStats(r.diffStats)
 			}
 		}
-		return m, tickUpdateMetadataCmd(m.snapshotActiveInstances(), m.list.GetSelectedInstance())
+		cmds := []tea.Cmd{
+			tickUpdateMetadataCmd(m.snapshotActiveInstances(), m.list.GetSelectedInstance(), m.relayMode == relayAuto),
+		}
+		cmds = append(cmds, m.processAutoRelay(msg.results)...)
+		return m, tea.Batch(cmds...)
 	case tea.MouseMsg:
 		// Handle mouse wheel events for scrolling the diff/preview pane
 		if msg.Action == tea.MouseActionPress {
@@ -776,6 +788,14 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			return m, m.handleError(err)
 		}
 		return m, tea.WindowSize()
+	case keys.KeyRelayMode:
+		m.toggleRelayMode()
+		return m, nil
+	case keys.KeyRelay:
+		if err := m.manualRelay(m.list.GetSelectedInstance()); err != nil {
+			return m, m.handleError(err)
+		}
+		return m, nil
 	case keys.KeyEnter:
 		if m.list.NumInstances() == 0 {
 			return m, nil
@@ -903,10 +923,12 @@ func (m *home) runBranchSearch(filter string, version uint64) tea.Cmd {
 // instanceMetaResult holds the results of a single instance's metadata update,
 // computed in a background goroutine.
 type instanceMetaResult struct {
-	instance  *session.Instance
-	updated   bool
-	hasPrompt bool
-	diffStats *git.DiffStats
+	instance    *session.Instance
+	updated     bool
+	hasPrompt   bool
+	diffStats   *git.DiffStats
+	relayOutput string
+	relayErr    error
 }
 
 // metadataUpdateDoneMsg is sent when the background metadata update completes.
@@ -951,7 +973,7 @@ func (m *home) snapshotActiveInstances() []*session.Instance {
 // Only the selected instance gets a full diff (with Content); the rest get a
 // lightweight numstat-only summary. This keeps per-instance memory bounded
 // since the diff pane only ever renders the selected one.
-func tickUpdateMetadataCmd(active []*session.Instance, selected *session.Instance) tea.Cmd {
+func tickUpdateMetadataCmd(active []*session.Instance, selected *session.Instance, autoRelay bool) tea.Cmd {
 	return func() tea.Msg {
 		time.Sleep(500 * time.Millisecond)
 
@@ -968,6 +990,9 @@ func tickUpdateMetadataCmd(active []*session.Instance, selected *session.Instanc
 				r := &results[i]
 				r.instance = instance
 				r.updated, r.hasPrompt = instance.HasUpdated()
+				if autoRelay && !r.updated {
+					r.relayOutput, r.relayErr = instance.PreviewFullHistory()
+				}
 				if instance == selected {
 					r.diffStats = instance.ComputeDiff()
 				} else {

@@ -22,6 +22,8 @@ const (
 
 	KeyCheckout
 	KeyResume
+	KeyRelay
+	KeyRelayMode
 	KeyPrompt // New key for entering a prompt
 	KeyHelp   // Key for showing help screen
 
@@ -53,6 +55,8 @@ var GlobalKeyStringsMap = map[string]KeyName{
 	"tab":        KeyTab,
 	"c":          KeyCheckout,
 	"r":          KeyResume,
+	"R":          KeyRelay,
+	"A":          KeyRelayMode,
 	"p":          KeySubmit,
 	"?":          KeyHelp,
 }
@@ -114,6 +118,14 @@ var GlobalkeyBindings = map[KeyName]key.Binding{
 	KeyResume: key.NewBinding(
 		key.WithKeys("r"),
 		key.WithHelp("r", "resume"),
+	),
+	KeyRelay: key.NewBinding(
+		key.WithKeys("R"),
+		key.WithHelp("R", "relay reply"),
+	),
+	KeyRelayMode: key.NewBinding(
+		key.WithKeys("A"),
+		key.WithHelp("A", "relay mode"),
 	),
 
 	KeyMoveUp: key.NewBinding(
