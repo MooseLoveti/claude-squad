@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 
 	xansi "github.com/charmbracelet/x/ansi"
@@ -23,12 +24,32 @@ const (
 	AgentAntigravity
 )
 
+// Slot is a pane position in the 2×2 dashboard.
+type Slot int
+
+const (
+	SlotTopLeft Slot = iota
+	SlotTopRight
+	SlotBottomLeft
+	SlotBottomRight
+)
+
+// LaunchEnv is what an agent's launch arguments may refer to.
+type LaunchEnv struct {
+	// SharedDir holds every worktree and relay transcript.
+	SharedDir string
+	// Self is the claude-squad executable, for CLIs that call back into it.
+	Self string
+}
+
 // agentSpec holds everything that differs between relay agents. Supporting a
 // new CLI means adding one Agent constant and one entry in specs.
 type agentSpec struct {
 	// executable is matched against the configured program.
 	executable string
 	label      string
+	// slot is where the agent's pane sits in the dashboard.
+	slot Slot
 	// tags address the agent in a reply; the first one is canonical.
 	tags []string
 	// responseMarkers start an assistant reply at column zero in the TUI.
@@ -50,13 +71,17 @@ type agentSpec struct {
 	// instead of the pane, for CLIs whose screen does not separate the reply
 	// from other output. key identifies the reply across polls.
 	latestReply func(cwd string) (text, key string, err error)
-	// launchArgs grant access to sharedDir, which holds every worktree and
-	// relay transcript, so reading a peer never stops on a permission prompt.
-	launchArgs func(sharedDir string) []string
+	// logBusy reports, for log-based agents, whether the latest prompt is
+	// still being worked on.
+	logBusy func(cwd string) bool
+	// launchArgs grant access to the shared directory, so reading a peer never
+	// stops on a permission prompt, and wire up usage reporting.
+	launchArgs func(env LaunchEnv) []string
 	findLog    func(cwd string) (string, error)
 	parseLog   func(io.Reader) ([]turn, error)
-	// consult prepares a fresh one-shot run that answers a question.
-	consult func(ctx context.Context, target ConsultTarget, prompt string) consultRun
+	// usage reads the account's remaining rate limits, worth doing every usagePoll.
+	usage     func(ctx context.Context, env UsageEnv) (Usage, error)
+	usagePoll time.Duration
 }
 
 // relayAgents fixes the iteration order so routing and detection are deterministic.
@@ -66,49 +91,59 @@ var specs = map[Agent]agentSpec{
 	AgentClaude: {
 		executable:       "claude",
 		label:            "Claude Code",
+		slot:             SlotBottomLeft,
 		tags:             []string{"@claude"},
 		responseMarkers:  []string{"⏺", "●"},
 		boundaryPrefixes: []string{"❯", "✻", "✽", "✢", "✶"},
 		inputPrefix:      "❯",
 		busyMarkers:      []string{"esc to interrupt"},
-		launchArgs: func(sharedDir string) []string {
-			return []string{"--add-dir", sharedDir}
-		},
-		findLog:  findClaudeLog,
-		parseLog: parseClaudeLog,
-		consult:  claudeConsult,
+		launchArgs:       claudeLaunchArgs,
+		findLog:          findClaudeLog,
+		parseLog:         parseClaudeLog,
+		usage:            claudeUsage,
+		usagePoll:        localUsagePoll,
 	},
 	AgentCodex: {
 		executable:       "codex",
 		label:            "Codex",
+		slot:             SlotTopLeft,
 		tags:             []string{"@codex"},
 		responseMarkers:  []string{"•"},
 		boundaryPrefixes: []string{"›"},
 		inputPrefix:      "›",
 		// Codex marks its "Working" status line with the same bullet as replies.
 		busyMarkers: []string{"esc to interrupt"},
-		replyFooter: regexp.MustCompile(`^\s*Worked for \d`),
+		replyFooter: regexp.MustCompile(`^\s*(Worked for \d|└ Tip: )`),
 		// Codex's read-only sandbox can already read the whole filesystem.
-		launchArgs: func(string) []string { return nil },
+		launchArgs: func(LaunchEnv) []string { return nil },
 		findLog:    findCodexLog,
 		parseLog:   parseCodexLog,
-		consult:    codexConsult,
+		usage:      codexUsage,
+		usagePoll:  localUsagePoll,
 	},
 	AgentAntigravity: {
 		executable:  "agy",
 		label:       "Gemini",
+		slot:        SlotBottomRight,
 		tags:        []string{"@gemini", "@agy"},
 		inputPrefix: ">",
 		// The pane interleaves thinking summaries with the reply at the same
 		// indentation, so the reply comes from the session log instead.
 		latestReply: agyLatestReply,
+		logBusy:     agyBusy,
 		// --add-dir makes agy run commands in the added directory instead of
 		// its own worktree; reads outside the workspace ask once instead.
-		launchArgs: func(string) []string { return nil },
+		launchArgs: func(LaunchEnv) []string { return nil },
 		findLog:    findAgyLog,
 		parseLog:   parseAgyLog,
-		consult:    agyConsult,
+		usage:      agyUsage,
+		usagePoll:  networkUsagePoll,
 	},
+}
+
+// Agents lists every supported agent in a fixed order.
+func Agents() []Agent {
+	return append([]Agent(nil), relayAgents...)
 }
 
 // DetectAgent finds the agent executable in a configured program command.
@@ -119,6 +154,16 @@ func DetectAgent(program string) Agent {
 			if specs[agent].executable == name {
 				return agent
 			}
+		}
+	}
+	return AgentUnknown
+}
+
+// AgentByName finds an agent by Name, as stored in saved state and tmux.
+func AgentByName(name string) Agent {
+	for _, agent := range relayAgents {
+		if agent.Name() == name {
+			return agent
 		}
 	}
 	return AgentUnknown
@@ -139,12 +184,41 @@ func (a Agent) Tag() string {
 	return ""
 }
 
+// Name is the canonical tag without "@", e.g. "codex"; it names the agent's
+// branch, saved state and pane.
+func (a Agent) Name() string {
+	return strings.TrimPrefix(a.Tag(), "@")
+}
+
+// Executable is the command run when no profile configures the agent.
+func (a Agent) Executable() string {
+	return specs[a].executable
+}
+
+// Slot is where the agent's pane sits in the dashboard.
+func (a Agent) Slot() Slot {
+	return specs[a].slot
+}
+
 // LaunchArgs returns extra CLI arguments for starting the agent; see agentSpec.
-func (a Agent) LaunchArgs(sharedDir string) []string {
+func (a Agent) LaunchArgs(env LaunchEnv) []string {
 	if spec, ok := specs[a]; ok {
-		return spec.launchArgs(sharedDir)
+		return spec.launchArgs(env)
 	}
 	return nil
+}
+
+// Busy reports whether the agent is still working on its latest prompt, read
+// from its session log or from the bottom of its pane.
+func (a Agent) Busy(cwd, pane string) bool {
+	spec, ok := specs[a]
+	if !ok {
+		return false
+	}
+	if spec.logBusy != nil {
+		return spec.logBusy(cwd)
+	}
+	return isBusy(spec, pane)
 }
 
 // allTag addresses every other running agent at once.
@@ -360,62 +434,26 @@ type Sender struct {
 // quoteLimit keeps a quoted exchange short; the transcript has the rest.
 const quoteLimit = 1500
 
+const truncatedNote = " …（以下省略。全文は会話全文ファイルを参照）"
+
 func quote(text string) string {
 	runes := []rune(strings.TrimSpace(text))
 	if len(runes) <= quoteLimit {
 		return string(runes)
 	}
-	return string(runes[:quoteLimit]) + " …(truncated; see the transcript)"
+	return string(runes[:quoteLimit]) + truncatedNote
 }
 
-func (s Sender) writeContext(b *strings.Builder) {
-	fmt.Fprintf(b, "%s worktree (read only for you): %s\n", s.Agent.Label(), s.WorktreePath)
+// writeContext tells a recipient working in toDir where the sender's work is.
+func (s Sender) writeContext(b *strings.Builder, toDir string) {
+	if s.WorktreePath == toDir {
+		fmt.Fprintf(b, "作業ディレクトリ（%s と共有）: %s\n", s.Agent.Label(), s.WorktreePath)
+	} else {
+		fmt.Fprintf(b, "%s の作業ディレクトリ（あなたは読み取りのみ）: %s\n", s.Agent.Label(), s.WorktreePath)
+	}
 	if s.TranscriptPath != "" {
-		fmt.Fprintf(b, "%s full session transcript: %s\n", s.Agent.Label(), s.TranscriptPath)
+		fmt.Fprintf(b, "%s の会話全文: %s\n", s.Agent.Label(), s.TranscriptPath)
 	}
-}
-
-// Answer is one agent's reply to a question asked of several agents.
-type Answer struct {
-	From Sender
-	Text string
-}
-
-// FormatAnswers combines the answers to a question into one message for the
-// asking session, labelled by who said what. The question is repeated because
-// the asking agent may never have seen it: the user can type it in place.
-func FormatAnswers(question string, fromUser bool, answers []Answer) string {
-	agents := make([]Agent, len(answers))
-	for i, a := range answers {
-		agents[i] = a.From.Agent
-	}
-	asker := "you"
-	if fromUser {
-		asker = "the user"
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "[Answers from %s]\n", joinLabels(agents))
-	fmt.Fprintf(&b, "Question (asked by %s): %s\n", asker, strings.TrimSpace(question))
-	for _, a := range answers {
-		fmt.Fprintf(&b, "\n=== %s's answer ===\n", a.From.Agent.Label())
-		a.From.writeContext(&b)
-		fmt.Fprintf(&b, "\n%s\n", strings.TrimSpace(a.Text))
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-func joinLabels(agents []Agent) string {
-	labels := make([]string, len(agents))
-	for i, a := range agents {
-		labels[i] = a.Label()
-	}
-	return strings.Join(labels, ", ")
-}
-
-// RepliesFromLog reports whether the agent's replies are read from its session
-// log, which marks a reply finished on its own, rather than from the pane.
-func (a Agent) RepliesFromLog() bool {
-	return specs[a].latestReply != nil
 }
 
 // LatestReply returns the agent's most recent reply and a stable identity for

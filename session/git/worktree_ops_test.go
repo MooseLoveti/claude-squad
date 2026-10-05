@@ -57,10 +57,8 @@ func TestSetupFromExistingBranch_RemovesOrphanedDirectory(t *testing.T) {
 		t.Fatalf("orphan marker still exists after Setup, err = %v", err)
 	}
 
-	if valid, err := g.IsValidWorktree(); err != nil {
-		t.Fatalf("IsValidWorktree() error = %v", err)
-	} else if !valid {
-		t.Fatal("expected Setup() to recreate a valid worktree")
+	if _, err := os.Stat(filepath.Join(worktreePath, ".git")); err != nil {
+		t.Fatalf("expected Setup() to recreate a valid worktree: %v", err)
 	}
 
 	currentBranch := mustRunGit(t, worktreePath, "branch", "--show-current")

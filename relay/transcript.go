@@ -448,13 +448,44 @@ func latestAgyReply(r io.Reader) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
+	if last, ok := finishedAgyReply(steps); ok {
+		return strings.TrimSpace(last.Content), strconv.Itoa(last.Index), nil
+	}
+	return "", "", errors.New("no completed Gemini reply to the latest prompt yet")
+}
+
+func finishedAgyReply(steps []agyStep) (agyStep, bool) {
 	if n := len(steps); n > 0 {
 		last := steps[n-1]
 		if last.Type == "PLANNER_RESPONSE" && last.Status == "DONE" && len(last.ToolCalls) == 0 && strings.TrimSpace(last.Content) != "" {
-			return strings.TrimSpace(last.Content), strconv.Itoa(last.Index), nil
+			return last, true
 		}
 	}
-	return "", "", errors.New("no completed Gemini reply to the latest prompt yet")
+	return agyStep{}, false
+}
+
+// agyBusy reports a prompt still being worked on: the log ends in anything
+// but a finished reply. A missing or empty log means nothing was asked yet.
+func agyBusy(cwd string) bool {
+	path, err := findAgyLog(cwd)
+	if err != nil {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	return agyStepsBusy(f)
+}
+
+func agyStepsBusy(r io.Reader) bool {
+	steps, err := readAgySteps(r)
+	if err != nil || len(steps) == 0 {
+		return false
+	}
+	_, finished := finishedAgyReply(steps)
+	return !finished
 }
 
 // appendTurn merges consecutive messages from the same speaker, because both

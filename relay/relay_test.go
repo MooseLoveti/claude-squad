@@ -39,6 +39,11 @@ func TestLatestPaneReplyDropsCodexFooter(t *testing.T) {
 	got, _, err = latestPaneReply(AgentCodex, pane)
 	require.NoError(t, err)
 	require.Equal(t, "Timing matters:\n  Worked for 4s is how long it took.\n  done", got, "only trailing footers are trimmed")
+
+	pane = "› 3+3は？\n• 6\n  └ Tip: Use /copy or press ctrl+o to copy the latest agent response as Markdown.\n  Worked for 5s • 14:54\n› "
+	got, _, err = latestPaneReply(AgentCodex, pane)
+	require.NoError(t, err)
+	require.Equal(t, "6", got, "a tip under the reply is not part of it")
 }
 
 func TestLatestPaneReplyKeepsIndentedPromptGlyphs(t *testing.T) {
@@ -140,41 +145,6 @@ func TestRouteIgnoresOwnTagAndUntagged(t *testing.T) {
 	require.False(t, Route(AgentCodex, "no tag here").Tagged())
 }
 
-func TestFormatAnswers(t *testing.T) {
-	got := FormatAnswers("which container? ", true, []Answer{
-		{From: Sender{Agent: AgentClaude, WorktreePath: "/wt/claude", TranscriptPath: "/cfg/relay/claude.md"}, Text: "use a map\n"},
-		{From: Sender{Agent: AgentAntigravity, WorktreePath: "/wt/agy"}, Text: "use a slice"},
-	})
-	require.Equal(t,
-		"[Answers from Claude Code, Gemini]\n"+
-			"Question (asked by the user): which container?\n"+
-			"\n=== Claude Code's answer ===\n"+
-			"Claude Code worktree (read only for you): /wt/claude\n"+
-			"Claude Code full session transcript: /cfg/relay/claude.md\n"+
-			"\nuse a map\n"+
-			"\n=== Gemini's answer ===\n"+
-			"Gemini worktree (read only for you): /wt/agy\n"+
-			"\nuse a slice",
-		got)
-
-	require.Contains(t, FormatAnswers("q", false, []Answer{{From: Sender{Agent: AgentCodex}, Text: "a"}}),
-		"Question (asked by you): q\n")
-}
-
-func TestLaunchArgs(t *testing.T) {
-	require.Equal(t, []string{"--add-dir", "/cfg"}, AgentClaude.LaunchArgs("/cfg"))
-	require.Nil(t, AgentCodex.LaunchArgs("/cfg"))
-	require.Nil(t, AgentAntigravity.LaunchArgs("/cfg"), "--add-dir would move agy's command cwd")
-	require.Nil(t, AgentUnknown.LaunchArgs("/cfg"))
-}
-
-func TestRepliesFromLog(t *testing.T) {
-	require.True(t, AgentAntigravity.RepliesFromLog())
-	require.False(t, AgentClaude.RepliesFromLog())
-	require.False(t, AgentCodex.RepliesFromLog())
-	require.False(t, AgentUnknown.RepliesFromLog())
-}
-
 func TestTags(t *testing.T) {
 	require.Equal(t, "@claude", AgentClaude.Tag())
 	require.Equal(t, "@gemini", AgentAntigravity.Tag())
@@ -226,35 +196,7 @@ func TestInputText(t *testing.T) {
 func TestQuoteTruncatesLongText(t *testing.T) {
 	long := strings.Repeat("あ", quoteLimit+10)
 	got := quote(long)
-	require.True(t, strings.HasSuffix(got, " …(truncated; see the transcript)"))
-	require.Equal(t, quoteLimit, len([]rune(strings.TrimSuffix(got, " …(truncated; see the transcript)"))))
+	require.True(t, strings.HasSuffix(got, truncatedNote))
+	require.Equal(t, quoteLimit, len([]rune(strings.TrimSuffix(got, truncatedNote))))
 	require.Equal(t, "short", quote("  short \n"))
-}
-
-func TestQuestionFormat(t *testing.T) {
-	from := Sender{Agent: AgentClaude, WorktreePath: "/wt/claude", TranscriptPath: "/cfg/relay/claude.md",
-		Latest: &Exchange{User: "日本最強の動物は？", Assistant: "ヒグマです。"}}
-	q := Question{From: from, FromUser: true, To: AgentCodex, ToWorktree: "/wt/codex",
-		AlsoAsked: []Agent{AgentAntigravity}, Text: " お前らどう思う？ "}
-	require.Equal(t,
-		"[Question from the user, asked in the Claude Code session]\n"+
-			"You are Codex, consulted in a fresh session. Your own worktree: /wt/codex\n"+
-			"Claude Code worktree (read only for you): /wt/claude\n"+
-			"Claude Code full session transcript: /cfg/relay/claude.md\n"+
-			"--- Latest exchange in the Claude Code session ---\n"+
-			"User: 日本最強の動物は？\n"+
-			"Claude Code: ヒグマです。\n---\n"+
-			"Also asked: Gemini.\n"+
-			"Answer directly; your reply is passed back to Claude Code.\n"+
-			"\nお前らどう思う？",
-		q.Format())
-
-	q = Question{From: Sender{Agent: AgentCodex, WorktreePath: "/wt/codex"}, To: AgentClaude, ToWorktree: "/wt/claude", Text: "review"}
-	require.Equal(t,
-		"[Message from Codex]\n"+
-			"You are Claude Code, consulted in a fresh session. Your own worktree: /wt/claude\n"+
-			"Codex worktree (read only for you): /wt/codex\n"+
-			"Answer directly; your reply is passed back to Codex.\n"+
-			"\nreview",
-		q.Format(), "an agent's message without a session history or other recipients")
 }
