@@ -33,11 +33,14 @@ var (
 
 // TextInputOverlay represents a text input overlay with state management.
 type TextInputOverlay struct {
-	textarea      textarea.Model
-	Title         string
-	FocusIndex    int // index into focusable stops
-	Submitted     bool
-	Canceled      bool
+	textarea   textarea.Model
+	Title      string
+	FocusIndex int // index into focusable stops
+	Submitted  bool
+	Canceled   bool
+	// SubmitOnEnter makes Enter in the textarea submit instead of adding a
+	// newline, for one-line prompts.
+	SubmitOnEnter bool
 	OnSubmit      func()
 	width         int
 	height        int
@@ -189,7 +192,7 @@ func (t *TextInputOverlay) HandleKeyPress(msg tea.KeyMsg) (bool, bool) {
 		t.Canceled = true
 		return true, false
 	case tea.KeyEnter:
-		if t.isEnterButton() {
+		if t.isEnterButton() || (t.SubmitOnEnter && t.isTextarea()) {
 			t.Submitted = true
 			if t.OnSubmit != nil {
 				t.OnSubmit()

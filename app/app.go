@@ -4,6 +4,7 @@ import (
 	"claude-squad/config"
 	"claude-squad/keys"
 	"claude-squad/log"
+	"claude-squad/relay"
 	"claude-squad/session"
 	"claude-squad/session/git"
 	"claude-squad/ui"
@@ -19,17 +20,20 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
+	"golang.org/x/term"
 )
 
 const GlobalInstanceLimit = 10
 
 // Run is the main entrypoint into the application.
 func Run(ctx context.Context, program string, autoYes bool) error {
+	h := newHome(ctx, program, autoYes)
 	p := tea.NewProgram(
-		newHome(ctx, program, autoYes),
+		h,
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(), // Mouse scroll
 	)
+	h.teaProgram = p
 	_, err := p.Run()
 	return err
 }
@@ -44,6 +48,8 @@ const (
 	statePrompt
 	// stateHelp is the state when a help screen is displayed.
 	stateHelp
+	// stateAnswers is the state when combined relay answers are displayed.
+	stateAnswers
 	// stateConfirm is the state when a confirmation modal is displayed.
 	stateConfirm
 )
@@ -81,6 +87,26 @@ type home struct {
 	relayMode      relayMode
 	autoRelayCount int
 	autoRelaySeen  map[*session.Instance][32]byte
+	// pendingAsks are questions whose consultations are still running, oldest
+	// first; consultAnswers carries their answers back from the goroutines.
+	pendingAsks    []*relayGather
+	consultAnswers chan consultAnswer
+	// lastAnswers is the latest combined answer set, kept so v can reopen it;
+	// answersUnseen holds it back until the user is free to read it.
+	lastAnswers    *shownAnswers
+	answersUnseen  bool
+	answersOverlay *overlay.ScrollOverlay
+	windowWidth    int
+	windowHeight   int
+	// relayEpoch advances around each attach; see metadataUpdateDoneMsg.
+	relayEpoch int
+	// attached is the session the user is attached to, if any.
+	attached *session.Instance
+	// askNotes is the question status shown in each asking session's tmux
+	// status bar.
+	askNotes map[*session.Instance]string
+	// teaProgram runs this model; attaching hands the terminal over through it.
+	teaProgram *tea.Program
 
 	// instanceStarting is true while a background instance start is in progress.
 	// Prevents double-submission and guards against interacting with a not-yet-started instance.
@@ -123,19 +149,20 @@ func newHome(ctx context.Context, program string, autoYes bool) *home {
 	}
 
 	h := &home{
-		ctx:           ctx,
-		spinner:       spinner.New(spinner.WithSpinner(spinner.MiniDot)),
-		menu:          ui.NewMenu(),
-		tabbedWindow:  ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewDiffPane(), ui.NewTerminalPane()),
-		errBox:        ui.NewErrBox(),
-		storage:       storage,
-		appConfig:     appConfig,
-		program:       program,
-		autoYes:       autoYes,
-		state:         stateDefault,
-		appState:      appState,
-		relayMode:     relayManual,
-		autoRelaySeen: make(map[*session.Instance][32]byte),
+		ctx:            ctx,
+		spinner:        spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		menu:           ui.NewMenu(),
+		tabbedWindow:   ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewDiffPane(), ui.NewTerminalPane()),
+		errBox:         ui.NewErrBox(),
+		storage:        storage,
+		appConfig:      appConfig,
+		program:        program,
+		autoYes:        autoYes,
+		state:          stateDefault,
+		appState:       appState,
+		relayMode:      relayManual,
+		autoRelaySeen:  make(map[*session.Instance][32]byte),
+		consultAnswers: make(chan consultAnswer, 32),
 	}
 	h.list = ui.NewList(&h.spinner, autoYes)
 	h.updateRelayMenu()
@@ -162,6 +189,10 @@ func newHome(ctx context.Context, program string, autoYes bool) *home {
 // updateHandleWindowSizeEvent sets the sizes of the components.
 // The components will try to render inside their bounds.
 func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
+	m.windowWidth, m.windowHeight = msg.Width, msg.Height
+	if m.answersOverlay != nil {
+		m.answersOverlay.SetSize(answersOverlaySize(msg.Width, msg.Height))
+	}
 	// List takes 30% of width, preview takes 70%
 	listWidth := int(float32(msg.Width) * 0.3)
 	tabsWidth := msg.Width - listWidth
@@ -197,7 +228,7 @@ func (m *home) Init() tea.Cmd {
 			time.Sleep(100 * time.Millisecond)
 			return previewTickMsg{}
 		},
-		tickUpdateMetadataCmd(m.snapshotActiveInstances(), m.list.GetSelectedInstance(), m.relayMode == relayAuto),
+		tickUpdateMetadataCmd(m.snapshotActiveInstances(), m.list.GetSelectedInstance(), m.relayWatching(), m.relayEpoch),
 	)
 }
 
@@ -266,9 +297,13 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		cmds := []tea.Cmd{
-			tickUpdateMetadataCmd(m.snapshotActiveInstances(), m.list.GetSelectedInstance(), m.relayMode == relayAuto),
+			tickUpdateMetadataCmd(m.snapshotActiveInstances(), m.list.GetSelectedInstance(), m.relayWatching(), m.relayEpoch),
 		}
-		cmds = append(cmds, m.processAutoRelay(msg.results)...)
+		if msg.relayEpoch == m.relayEpoch {
+			cmds = append(cmds, m.processAutoRelay(msg.results)...)
+		}
+		cmds = append(cmds, m.collectAnswers()...)
+		m.openAnswersIfIdle()
 		return m, tea.Batch(cmds...)
 	case tea.MouseMsg:
 		// Handle mouse wheel events for scrolling the diff/preview pane
@@ -369,7 +404,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		m.keySent = false
 		return nil, false
 	}
-	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm {
+	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm || m.state == stateAnswers {
 		return nil, false
 	}
 	// If it's in the global keymap, we should try to highlight it.
@@ -404,6 +439,14 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 
 	if m.state == stateHelp {
 		return m.handleHelpState(msg)
+	}
+
+	if m.state == stateAnswers {
+		if m.answersOverlay.HandleKeyPress(msg) {
+			m.answersOverlay = nil
+			m.state = stateDefault
+		}
+		return m, nil
 	}
 
 	if m.state == stateNew {
@@ -547,8 +590,9 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 					return m, tea.Batch(tea.WindowSize(), m.instanceChanged(), startCmd)
 				}
 
-				// Regular flow: instance already running, just send prompt
-				if err := selected.SendPrompt(prompt); err != nil {
+				// Regular flow: instance already running, send the prompt or
+				// ask the agents it tags
+				if err := m.submitPrompt(selected, prompt); err != nil {
 					return m, m.handleError(err)
 				}
 			}
@@ -791,6 +835,21 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	case keys.KeyRelayMode:
 		m.toggleRelayMode()
 		return m, nil
+	case keys.KeyAsk:
+		selected := m.list.GetSelectedInstance()
+		if selected == nil || !selected.Started() || selected.Paused() || !selected.TmuxAlive() {
+			return m, nil
+		}
+		m.state = statePrompt
+		m.menu.SetState(ui.StatePrompt)
+		m.textInputOverlay = overlay.NewTextInputOverlay("Ask (@claude @codex @gemini @all ask other agents)", "")
+		m.textInputOverlay.SubmitOnEnter = true
+		return m, tea.WindowSize()
+	case keys.KeyAnswers:
+		if m.lastAnswers != nil {
+			m.openAnswers()
+		}
+		return m, nil
 	case keys.KeyRelay:
 		if err := m.manualRelay(m.list.GetSelectedInstance()); err != nil {
 			return m, m.handleError(err)
@@ -807,6 +866,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		// Terminal tab: attach to terminal session
 		if m.tabbedWindow.IsInTerminalTab() {
 			m.showHelpScreen(helpTypeInstanceAttach{}, func() {
+				takeBack := m.handOverTerminal()
+				defer takeBack()
 				ch, err := m.tabbedWindow.AttachTerminal()
 				if err != nil {
 					m.handleError(err)
@@ -819,18 +880,52 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		}
 		// Show help screen before attaching
 		m.showHelpScreen(helpTypeInstanceAttach{}, func() {
+			takeBack := m.handOverTerminal()
+			defer takeBack()
+			stopRelay := m.relayWhileAttached(selected)
 			ch, err := m.list.Attach()
 			if err != nil {
+				stopRelay()
 				m.handleError(err)
 				return
 			}
 			<-ch
+			stopRelay()
 			m.state = stateDefault
 			m.instanceChanged()
 		})
 		return m, nil
 	default:
 		return m, nil
+	}
+}
+
+// handOverTerminal gives the terminal to an attached tmux session: the UI stops
+// reading the keyboard and drawing, and the terminal stays raw so keys reach
+// tmux one by one. Without this the UI's own input reader keeps running during
+// an attach and steals random keystrokes, Ctrl+Q included, from the session.
+func (m *home) handOverTerminal() (takeBack func()) {
+	if m.teaProgram == nil {
+		return func() {}
+	}
+	if err := m.teaProgram.ReleaseTerminal(); err != nil {
+		log.ErrorLog.Printf("could not release the terminal for attach: %v", err)
+		return func() {}
+	}
+	fd := int(os.Stdin.Fd())
+	rawState, err := term.MakeRaw(fd)
+	if err != nil {
+		log.ErrorLog.Printf("could not make the terminal raw for attach: %v", err)
+	}
+	return func() {
+		if rawState != nil {
+			if err := term.Restore(fd, rawState); err != nil {
+				log.ErrorLog.Printf("could not restore the terminal after attach: %v", err)
+			}
+		}
+		if err := m.teaProgram.RestoreTerminal(); err != nil {
+			log.ErrorLog.Printf("could not take the terminal back after attach: %v", err)
+		}
 	}
 }
 
@@ -934,6 +1029,9 @@ type instanceMetaResult struct {
 // metadataUpdateDoneMsg is sent when the background metadata update completes.
 type metadataUpdateDoneMsg struct {
 	results []instanceMetaResult
+	// relayEpoch is the epoch the tick started in; results from before an
+	// attach ended are stale, because relays ran in the background meanwhile.
+	relayEpoch int
 }
 
 // instanceStartDoneMsg is sent when the background instance start completes.
@@ -973,12 +1071,12 @@ func (m *home) snapshotActiveInstances() []*session.Instance {
 // Only the selected instance gets a full diff (with Content); the rest get a
 // lightweight numstat-only summary. This keeps per-instance memory bounded
 // since the diff pane only ever renders the selected one.
-func tickUpdateMetadataCmd(active []*session.Instance, selected *session.Instance, autoRelay bool) tea.Cmd {
+func tickUpdateMetadataCmd(active []*session.Instance, selected *session.Instance, autoRelay bool, relayEpoch int) tea.Cmd {
 	return func() tea.Msg {
 		time.Sleep(500 * time.Millisecond)
 
 		if len(active) == 0 {
-			return metadataUpdateDoneMsg{}
+			return metadataUpdateDoneMsg{relayEpoch: relayEpoch}
 		}
 
 		results := make([]instanceMetaResult, len(active))
@@ -990,7 +1088,10 @@ func tickUpdateMetadataCmd(active []*session.Instance, selected *session.Instanc
 				r := &results[i]
 				r.instance = instance
 				r.updated, r.hasPrompt = instance.HasUpdated()
-				if autoRelay && !r.updated {
+				// A changing pane usually means the agent is still writing, but
+				// agents whose replies come from their log can finish while a
+				// spinner keeps the pane moving.
+				if autoRelay && (!r.updated || relay.DetectAgent(instance.Program).RepliesFromLog()) {
 					r.relayOutput, r.relayErr = instance.PreviewFullHistory()
 				}
 				if instance == selected {
@@ -1002,7 +1103,7 @@ func tickUpdateMetadataCmd(active []*session.Instance, selected *session.Instanc
 		}
 		wg.Wait()
 
-		return metadataUpdateDoneMsg{results: results}
+		return metadataUpdateDoneMsg{results: results, relayEpoch: relayEpoch}
 	}
 }
 
@@ -1089,6 +1190,8 @@ func (m *home) View() string {
 			log.ErrorLog.Printf("text overlay is nil")
 		}
 		return overlay.PlaceOverlay(0, 0, m.textOverlay.Render(), mainView, true, true)
+	} else if m.state == stateAnswers {
+		return overlay.PlaceOverlay(0, 0, m.answersOverlay.Render(), mainView, true, true)
 	} else if m.state == stateConfirm {
 		if m.confirmationOverlay == nil {
 			log.ErrorLog.Printf("confirmation overlay is nil")

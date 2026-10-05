@@ -12,8 +12,10 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/creack/pty"
@@ -31,6 +33,16 @@ type TmuxSession struct {
 	// The name of the tmux session and the sanitized name used for tmux commands.
 	sanitizedName string
 	program       string
+	// launchArgs are appended to program when starting the session. They are kept
+	// apart so checks that match on program keep working.
+	launchArgs []string
+	// clientPid is the process of this session's own tmux client, the one the
+	// user sees when attaching through this claude-squad. Other claude-squad
+	// processes may have their own clients on the same session.
+	clientPid int
+	// enterHook sees each Enter typed while attached; see SetEnterHook. It is
+	// read by the stdin goroutine and set by the UI, hence atomic.
+	enterHook atomic.Pointer[func() bool]
 	// ptyFactory is used to create a PTY for the tmux session.
 	ptyFactory PtyFactory
 	// cmdExec is used to execute commands in the tmux session.
@@ -90,6 +102,19 @@ func newTmuxSession(name string, program string, ptyFactory PtyFactory, cmdExec 
 	}
 }
 
+// SetLaunchArgs sets extra arguments passed to the program on the next Start.
+func (t *TmuxSession) SetLaunchArgs(args []string) {
+	t.launchArgs = args
+}
+
+func (t *TmuxSession) launchCommand() string {
+	command := t.program
+	for _, arg := range t.launchArgs {
+		command += " '" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
+	}
+	return command
+}
+
 // Start creates and starts a new tmux session, then attaches to it. Program is the command to run in
 // the session (ex. claude). workdir is the git worktree directory.
 func (t *TmuxSession) Start(workDir string) error {
@@ -99,7 +124,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	}
 
 	// Create a new detached tmux session and start claude in it
-	cmd := exec.Command("tmux", "new-session", "-d", "-s", t.sanitizedName, "-c", workDir, t.program)
+	cmd := exec.Command("tmux", "new-session", "-d", "-s", t.sanitizedName, "-c", workDir, t.launchCommand())
 
 	ptmx, err := t.ptyFactory.Start(cmd)
 	if err != nil {
@@ -192,11 +217,16 @@ func (t *TmuxSession) Restore() error {
 		return ErrSessionNotFound
 	}
 
-	ptmx, err := t.ptyFactory.Start(exec.Command("tmux", "attach-session", "-t", t.sanitizedName))
+	attach := exec.Command("tmux", "attach-session", "-t", t.sanitizedName)
+	ptmx, err := t.ptyFactory.Start(attach)
 	if err != nil {
 		return fmt.Errorf("error opening PTY: %w", err)
 	}
 	t.ptmx = ptmx
+	t.clientPid = 0
+	if attach.Process != nil {
+		t.clientPid = attach.Process.Pid
+	}
 	t.monitor = newStatusMonitor()
 	return nil
 }
@@ -237,8 +267,78 @@ func (t *TmuxSession) TapDAndEnter() error {
 }
 
 func (t *TmuxSession) SendKeys(keys string) error {
+	t.exitCopyMode()
 	_, err := t.ptmx.Write([]byte(keys))
 	return err
+}
+
+// SetStatusNote shows note at the right of the session's status bar, which
+// stays visible while the user is attached. An empty note restores the default.
+func (t *TmuxSession) SetStatusNote(note string) error {
+	if note == "" {
+		for _, option := range []string{"status-right", "status-right-length"} {
+			cmd := exec.Command("tmux", "set-option", "-u", "-t", t.sanitizedName, option)
+			if err := t.cmdExec.Run(cmd); err != nil {
+				return fmt.Errorf("reset %s of %s: %w", option, t.sanitizedName, err)
+			}
+		}
+		return nil
+	}
+	// tmux expands #-sequences in status strings; ## is a literal #. The
+	// length is a cap, and a byte count is never below the display width.
+	escaped := strings.ReplaceAll(note, "#", "##")
+	for _, args := range [][]string{
+		{"status-right-length", strconv.Itoa(len(escaped) + 2)},
+		{"status-right", escaped + " "},
+	} {
+		cmd := exec.Command("tmux", "set-option", "-t", t.sanitizedName, args[0], args[1])
+		if err := t.cmdExec.Run(cmd); err != nil {
+			return fmt.Errorf("set %s of %s: %w", args[0], t.sanitizedName, err)
+		}
+	}
+	return nil
+}
+
+// ShowPopup opens file in a scrollable popup over the session, on this
+// claude-squad's own client of it, without touching the program's input. A
+// session can have clients from other claude-squad processes too, and a popup
+// there would open where the user is not looking. less closes it on q.
+// display-popup only returns once the popup closes, so it runs in the
+// background; finding the client is checked up front.
+func (t *TmuxSession) ShowPopup(file string) error {
+	out, err := t.cmdExec.Output(exec.Command("tmux", "list-clients", "-t", t.sanitizedName, "-F", "#{client_pid} #{client_name}"))
+	if err != nil {
+		return fmt.Errorf("find the client of %s: %w", t.sanitizedName, err)
+	}
+	client := ""
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		pid, name, ok := strings.Cut(line, " ")
+		if ok && t.clientPid != 0 && pid == strconv.Itoa(t.clientPid) {
+			client = name
+		}
+	}
+	if client == "" {
+		return fmt.Errorf("this claude-squad has no client on %s", t.sanitizedName)
+	}
+	// -P replaces less's prompt, which would otherwise show the file path.
+	view := "LESSCHARSET=utf-8 less -R '-Ps(q to close)' '-Pm(q to close)' -- '" + strings.ReplaceAll(file, "'", `'\''`) + "'"
+	cmd := exec.Command("tmux", "display-popup", "-c", client, "-w", "90%", "-h", "85%", "-E", view)
+	go func() {
+		if err := t.cmdExec.Run(cmd); err != nil {
+			log.WarningLog.Printf("popup on %s: %v", t.sanitizedName, err)
+		}
+	}()
+	return nil
+}
+
+// exitCopyMode leaves tmux copy mode. With mouse on, scrolling enters it for
+// programs that draw on the normal screen (such as agy), and while it is active
+// tmux consumes every key itself, so typed or relayed text never arrives.
+func (t *TmuxSession) exitCopyMode() {
+	cmd := exec.Command("tmux", "copy-mode", "-q", "-t", t.sanitizedName)
+	if err := t.cmdExec.Run(cmd); err != nil {
+		log.WarningLog.Printf("could not leave copy mode in %s: %v", t.sanitizedName, err)
+	}
 }
 
 // HasUpdated checks if the tmux pane content has changed since the last tick. It also returns true if
@@ -267,6 +367,7 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
 }
 
 func (t *TmuxSession) Attach() (chan struct{}, error) {
+	t.exitCopyMode()
 	t.attachCh = make(chan struct{})
 
 	t.wg = &sync.WaitGroup{}
@@ -327,20 +428,54 @@ func (t *TmuxSession) Attach() (chan struct{}, error) {
 				continue
 			}
 
-			// Check for Ctrl+q (ASCII 17)
-			if nr == 1 && buf[0] == 17 {
-				// Detach from the session
+			if t.handleInput(buf[:nr]) {
 				t.Detach()
 				return
 			}
-
-			// Forward other input to tmux
-			_, _ = t.ptmx.Write(buf[:nr])
 		}
 	}()
 
 	t.monitorWindowSize()
 	return t.attachCh, nil
+}
+
+// detachKeys are the ways Ctrl+Q can arrive: the plain control byte, or the
+// kitty and xterm modifyOtherKeys encodings some terminals send instead.
+var detachKeys = [][]byte{{0x11}, []byte("\x1b[113;5u"), []byte("\x1b[27;5;113~")}
+
+// handleInput forwards attached keyboard input to tmux and reports whether it
+// asked to detach. Ctrl+Q is found anywhere in a read, since a fast typist or
+// the terminal can deliver it together with other bytes; what precedes it is
+// still forwarded. A lone Enter goes to the enter hook first.
+func (t *TmuxSession) handleInput(input []byte) bool {
+	at := -1
+	for _, key := range detachKeys {
+		if idx := bytes.Index(input, key); idx >= 0 && (at < 0 || idx < at) {
+			at = idx
+		}
+	}
+	if at >= 0 {
+		if at > 0 {
+			_, _ = t.ptmx.Write(input[:at])
+		}
+		return true
+	}
+	if hook := t.enterHook.Load(); hook != nil && len(input) == 1 && input[0] == '\r' && (*hook)() {
+		return false
+	}
+	_, _ = t.ptmx.Write(input)
+	return false
+}
+
+// SetEnterHook installs fn to run when Enter is pressed while attached. When
+// fn returns true the Enter is swallowed instead of reaching the program. A
+// nil fn removes the hook.
+func (t *TmuxSession) SetEnterHook(fn func() bool) {
+	if fn == nil {
+		t.enterHook.Store(nil)
+		return
+	}
+	t.enterHook.Store(&fn)
 }
 
 // DetachSafely disconnects from the current tmux session without panicking

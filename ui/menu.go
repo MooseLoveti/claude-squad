@@ -52,6 +52,7 @@ type Menu struct {
 	relayMode     string
 	relayCount    int
 	relayMax      int
+	relayNote     string
 
 	// keyDown is the key which is pressed. The default is -1.
 	keyDown keys.KeyName
@@ -71,11 +72,13 @@ func NewMenu() *Menu {
 	}
 }
 
-// SetRelayStatus updates the relay mode indicator shown above the key menu.
-func (m *Menu) SetRelayStatus(mode string, count, max int) {
+// SetRelayStatus updates the relay indicator shown above the key menu. note
+// adds relay progress, such as which answers are still owed.
+func (m *Menu) SetRelayStatus(mode string, count, max int, note string) {
 	m.relayMode = mode
 	m.relayCount = count
 	m.relayMax = max
+	m.relayNote = note
 }
 
 func (m *Menu) Keydown(name keys.KeyName) {
@@ -143,7 +146,7 @@ func (m *Menu) addInstanceOptions() {
 	options := []keys.KeyName{keys.KeyNew, keys.KeyKill}
 
 	// Action group
-	actionGroup := []keys.KeyName{keys.KeyEnter, keys.KeySubmit, keys.KeyRelay}
+	actionGroup := []keys.KeyName{keys.KeyEnter, keys.KeySubmit, keys.KeyAsk, keys.KeyRelay}
 	if m.instance.Status == session.Paused {
 		actionGroup = append(actionGroup, keys.KeyResume)
 	} else {
@@ -180,8 +183,8 @@ func (m *Menu) String() string {
 		end   int
 	}{
 		{0, 2},  // Instance management group (n, d)
-		{2, 6},  // Action group (enter, submit, relay, pause/resume)
-		{6, 10}, // System group (tab, relay mode, help, q)
+		{2, 7},  // Action group (enter, submit, ask, relay, pause/resume)
+		{7, 11}, // System group (tab, relay mode, help, q)
 	}
 	if m.state == StateEmpty {
 		groups = []struct{ start, end int }{{0, 2}, {2, len(m.options)}}
@@ -240,6 +243,9 @@ func (m *Menu) String() string {
 	relayStatus := fmt.Sprintf("Relay: %s", m.relayMode)
 	if m.relayMode == "AUTO" {
 		relayStatus = fmt.Sprintf("Relay: AUTO %d/%d", m.relayCount, m.relayMax)
+	}
+	if m.relayNote != "" {
+		relayStatus += "  ·  " + m.relayNote
 	}
 	centeredMenuText := lipgloss.JoinVertical(
 		lipgloss.Center,

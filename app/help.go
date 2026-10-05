@@ -53,9 +53,16 @@ func (h helpTypeGeneral) toContent() string {
 		keyStyle.Render("c")+descStyle.Render("         - Checkout: commit changes and pause session"),
 		keyStyle.Render("r")+descStyle.Render("         - Resume a paused session"),
 		"",
-		headerStyle.Render("Relay (one Claude Code + one Codex session):"),
-		keyStyle.Render("R")+descStyle.Render("         - Send the selected agent's latest reply to its peer"),
-		keyStyle.Render("A")+descStyle.Render("         - Toggle MANUAL/AUTO Relay mode (AUTO stops after 6 messages)"),
+		headerStyle.Render("Relay (claude, codex, agy; at most one session each):"),
+		keyStyle.Render("i")+descStyle.Render("         - Type a prompt for the selected agent; \"@codex ...\" or \"@all ...\" asks other agents instead"),
+		keyStyle.Render("R")+descStyle.Render("         - Send the selected agent's latest reply to the agents it tags (@claude/@codex/@gemini/@all)"),
+		keyStyle.Render("A")+descStyle.Render("         - Toggle MANUAL/AUTO Relay mode (AUTO forwards tagged replies, stops after 6)"),
+		descStyle.Render("            Each asked agent answers in a fresh one-shot run, so its own past sessions never leak in"),
+		descStyle.Render("            Questions carry the asking session's worktree path and full transcript"),
+		descStyle.Render("            Answers to your questions open in a popup and never reach the asking agent"),
+		descStyle.Render("            Answers to an agent's own tagged question are typed back to that agent"),
+		descStyle.Render("            While attached, start the input with a tag to ask in place"),
+		keyStyle.Render("v")+descStyle.Render("         - Show the latest answers again"),
 		"",
 		headerStyle.Render("Other:"),
 		keyStyle.Render("tab")+descStyle.Render("       - Switch between preview, diff, and terminal tabs"),
@@ -83,7 +90,7 @@ func (h helpTypeInstanceStart) toContent() string {
 		headerStyle.Render("Handoff:"),
 		keyStyle.Render("c")+descStyle.Render("     - Checkout this instance's branch"),
 		keyStyle.Render("p")+descStyle.Render("     - Push branch to GitHub to create a PR"),
-		keyStyle.Render("R")+descStyle.Render("     - Relay this agent's latest reply to its peer"),
+		keyStyle.Render("R")+descStyle.Render("     - Relay this agent's latest reply to the agents it tags"),
 	)
 	return content
 }

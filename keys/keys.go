@@ -24,8 +24,10 @@ const (
 	KeyResume
 	KeyRelay
 	KeyRelayMode
-	KeyPrompt // New key for entering a prompt
-	KeyHelp   // Key for showing help screen
+	KeyAsk     // Ask the selected agent, or the agents tagged in the prompt
+	KeyAnswers // Reopen the latest combined answers
+	KeyPrompt  // New key for entering a prompt
+	KeyHelp    // Key for showing help screen
 
 	// Diff keybindings
 	KeyShiftUp
@@ -57,6 +59,8 @@ var GlobalKeyStringsMap = map[string]KeyName{
 	"r":          KeyResume,
 	"R":          KeyRelay,
 	"A":          KeyRelayMode,
+	"i":          KeyAsk,
+	"v":          KeyAnswers,
 	"p":          KeySubmit,
 	"?":          KeyHelp,
 }
@@ -126,6 +130,14 @@ var GlobalkeyBindings = map[KeyName]key.Binding{
 	KeyRelayMode: key.NewBinding(
 		key.WithKeys("A"),
 		key.WithHelp("A", "relay mode"),
+	),
+	KeyAsk: key.NewBinding(
+		key.WithKeys("i"),
+		key.WithHelp("i", "ask"),
+	),
+	KeyAnswers: key.NewBinding(
+		key.WithKeys("v"),
+		key.WithHelp("v", "answers"),
 	),
 
 	KeyMoveUp: key.NewBinding(

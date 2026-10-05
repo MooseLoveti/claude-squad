@@ -1,7 +1,9 @@
 package session
 
 import (
+	"claude-squad/config"
 	"claude-squad/log"
+	"claude-squad/relay"
 	"claude-squad/session/git"
 	"claude-squad/session/tmux"
 	"errors"
@@ -136,7 +138,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 
 	if instance.Paused() {
 		instance.started = true
-		instance.tmuxSession = tmux.NewTmuxSession(instance.Title, instance.Program)
+		instance.tmuxSession = instance.newTmuxSession()
 	} else {
 		if err := instance.Start(false); err != nil {
 			return nil, err
@@ -144,6 +146,20 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	}
 
 	return instance, nil
+}
+
+// newTmuxSession lets relay-capable agents read the whole config directory, which
+// holds every peer worktree and relay transcript, so reviewing a peer never stalls
+// on a permission prompt.
+func (i *Instance) newTmuxSession() *tmux.TmuxSession {
+	session := tmux.NewTmuxSession(i.Title, i.Program)
+	configDir, err := config.GetConfigDir()
+	if err != nil {
+		log.WarningLog.Printf("starting %q without relay launch args: %v", i.Title, err)
+		return session
+	}
+	session.SetLaunchArgs(relay.DetectAgent(i.Program).LaunchArgs(configDir))
+	return session
 }
 
 // Options for creating a new instance
@@ -211,7 +227,7 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 		tmuxSession = i.tmuxSession
 	} else {
 		// Create new tmux session
-		tmuxSession = tmux.NewTmuxSession(i.Title, i.Program)
+		tmuxSession = i.newTmuxSession()
 	}
 	i.tmuxSession = tmuxSession
 
@@ -647,6 +663,38 @@ func (i *Instance) SendPrompt(prompt string) error {
 	}
 
 	return nil
+}
+
+// SetEnterHook lets fn intercept Enter while the user is attached; see
+// tmux.TmuxSession.SetEnterHook.
+func (i *Instance) SetEnterHook(fn func() bool) {
+	if i.tmuxSession != nil {
+		i.tmuxSession.SetEnterHook(fn)
+	}
+}
+
+// SetStatusNote shows note in the session's tmux status bar; "" removes it.
+func (i *Instance) SetStatusNote(note string) error {
+	if !i.started || i.tmuxSession == nil {
+		return fmt.Errorf("instance not started")
+	}
+	return i.tmuxSession.SetStatusNote(note)
+}
+
+// ShowPopup opens file in a popup over the session; see tmux.TmuxSession.ShowPopup.
+func (i *Instance) ShowPopup(file string) error {
+	if !i.started || i.tmuxSession == nil {
+		return fmt.Errorf("instance not started")
+	}
+	return i.tmuxSession.ShowPopup(file)
+}
+
+// ClearInput deletes the last n characters typed in the program's input box.
+func (i *Instance) ClearInput(n int) error {
+	if !i.started {
+		return fmt.Errorf("instance not started")
+	}
+	return i.tmuxSession.SendKeys(strings.Repeat("\x7f", n))
 }
 
 // PreviewFullHistory captures the entire tmux pane output including full scrollback history
