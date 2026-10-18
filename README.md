@@ -84,6 +84,8 @@ The dashboard is a tmux window on its own server (`tmux -L claudesquad`): the ag
 
 Click a pane, or move with Shift+arrow keys, to type into it; each agent runs as usual. `C-b z` zooms a pane, `C-b d` detaches and leaves everything running.
 
+The dashboard answers a few launch screens itself: Codex's Daybreak security reminder and its update offer are skipped (updating is left to you), and Reasonix's question whether to trust a new worktree is answered yes, so DeepSeek edits and runs commands without asking while its OS sandbox keeps writes inside its worktree. A question to an agent waits while one of these screens shows.
+
 The control panel shows:
 
 - **Remaining usage** of each account: Codex's 5-hour and weekly windows from its session logs, Claude Code's from the status line it reports to `cs statusline` (installed per session with `--settings`), agy's from `agy -p /usage` every 5 minutes, and DeepSeek's prepaid balance from its [balance API](https://api-docs.deepseek.com/api/get-user-balance) every 5 minutes, with the key in `DEEPSEEK_API_KEY` or the one Reasonix saved in `~/.reasonix/.env`. None of these runs a model turn.

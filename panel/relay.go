@@ -342,6 +342,10 @@ func (r *Relay) Step() {
 		r.history[m.Agent] = history
 		r.busy[m.Agent] = m.Agent.Busy(m.Dir, history)
 		r.dismissNotice(m)
+		// A question typed now would answer the notice, so it waits.
+		if m.Agent.NoticeKeys(history) != nil {
+			r.busy[m.Agent] = true
+		}
 	}
 
 	for _, a := range r.asks {

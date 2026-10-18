@@ -96,6 +96,15 @@ func TestNoticeKeys(t *testing.T) {
 	require.Nil(t, AgentCodex.NoticeKeys("Set up security for Daybreak mode\n"+strings.Repeat("• reply line\n", noticeTailLines)),
 		"a notice scrolled far up is no longer showing")
 	require.Nil(t, AgentClaude.NoticeKeys(notice), "only Codex shows this notice")
+
+	update := "  ✨ Update available! 0.162.0 -> 0.163.0\n\n› 1. Update now (runs `sh -c 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh'`)\n  2. Skip\n  3. Skip until next version\n\n  enter continue · esc skip\n"
+	require.Equal(t, []string{"Escape"}, AgentCodex.NoticeKeys(update), "skipped this time only")
+
+	trust := "In a trusted folder, edits and shell commands run without asking, here and in `reasonix run`:\n/wt/deepseek\n" +
+		"Trust this folder? (`reasonix trust --revoke` undoes it) [y/N]: "
+	require.Equal(t, []string{"y", "Enter"}, AgentDeepSeek.NoticeKeys(trust))
+	require.Nil(t, AgentDeepSeek.NoticeKeys("  Reasonix asks \"Trust this folder?\" once per worktree.\n ❯ \n"),
+		"a reply about the prompt is not the prompt")
 }
 
 const codexIdle = "• done\n\n› Ask Codex to do anything\n"

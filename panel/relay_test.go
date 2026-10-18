@@ -257,6 +257,20 @@ func TestQuestionWaitsWhileTheRecipientIsBusy(t *testing.T) {
 	require.Len(t, f.term.pasted[codexPane], 1)
 }
 
+func TestQuestionWaitsWhileANoticeShows(t *testing.T) {
+	f := newRelayFixture(t, claudeMember, codexMember)
+	f.term.screens[codexPane] = "  ✨ Update available! 0.162.0 -> 0.163.0\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n  enter continue · esc skip\n"
+	f.term.screens[claudePane] = claudeScreen("hi", "@codex 質問")
+	require.True(t, f.relay.HandleEnter(claudePane))
+	f.relay.Step()
+	require.Equal(t, []string{"Escape"}, f.term.keys[codexPane], "the update offer is skipped")
+	require.Empty(t, f.term.pasted[codexPane], "the question would answer the notice")
+
+	f.term.screens[codexPane] = codexScreen("hi")
+	f.relay.Step()
+	require.Len(t, f.term.pasted[codexPane], 1)
+}
+
 func TestAnswersWaitWhileTheAskerIsBusy(t *testing.T) {
 	f := newRelayFixture(t, claudeMember, codexMember)
 	f.term.screens[codexPane] = codexScreen("old")

@@ -90,8 +90,8 @@ type agentSpec struct {
 	// directory, for CLIs that take no instructions on their command line; the
 	// briefing is written there.
 	briefingFile string
-	// startupNotices are notices the CLI may show at launch that need no
-	// answer; the dashboard dismisses them.
+	// startupNotices are notices the CLI may show at launch, and the keys the
+	// dashboard answers them with.
 	startupNotices []startupNotice
 	findLog        func(cwd string) (string, error)
 	parseLog       func(io.Reader) ([]turn, error)
@@ -100,7 +100,7 @@ type agentSpec struct {
 	usagePoll time.Duration
 }
 
-// startupNotice is a notice a CLI shows at launch and the keys that dismiss it.
+// startupNotice is a notice a CLI shows at launch and the keys that answer it.
 type startupNotice struct {
 	marker string
 	keys   []string
@@ -142,13 +142,18 @@ var specs = map[Agent]agentSpec{
 		replyFooter: regexp.MustCompile(`^\s*(Worked for \d|└ Tip: )`),
 		// Codex's read-only sandbox can already read the whole filesystem.
 		launchArgs: codexLaunchArgs,
-		// Accounts with Daybreak models get a hardware security key reminder
-		// on every launch, which config cannot turn off.
-		startupNotices: []startupNotice{{marker: "Set up security for Daybreak mode", keys: []string{"Escape"}}},
-		findLog:        findCodexLog,
-		parseLog:       parseCodexLog,
-		usage:          codexUsage,
-		usagePoll:      localUsagePoll,
+		startupNotices: []startupNotice{
+			// Accounts with Daybreak models get a hardware security key
+			// reminder on every launch, which config cannot turn off.
+			{marker: "Set up security for Daybreak mode", keys: []string{"Escape"}},
+			// A new release is offered at launch; Escape skips it this time
+			// only, leaving updating to the user.
+			{marker: "Skip until next version", keys: []string{"Escape"}},
+		},
+		findLog:   findCodexLog,
+		parseLog:  parseCodexLog,
+		usage:     codexUsage,
+		usagePoll: localUsagePoll,
 	},
 	AgentAntigravity: {
 		executable:  "agy",
@@ -189,10 +194,14 @@ var specs = map[Agent]agentSpec{
 		// make them writable.
 		launchArgs:   func(LaunchEnv) []string { return nil },
 		briefingFile: "REASONIX.local.md",
-		findLog:      findReasonixLog,
-		parseLog:     parseReasonixLog,
-		usage:        deepseekUsage,
-		usagePoll:    networkUsagePoll,
+		// Each new worktree is asked about once before the TUI starts. A
+		// trusted folder runs edits and commands without asking, with writes
+		// confined to the worktree by the OS sandbox.
+		startupNotices: []startupNotice{{marker: "Trust this folder? (`reasonix trust --revoke` undoes it) [y/N]:", keys: []string{"y", "Enter"}}},
+		findLog:        findReasonixLog,
+		parseLog:       parseReasonixLog,
+		usage:          deepseekUsage,
+		usagePoll:      networkUsagePoll,
 	},
 }
 
