@@ -122,10 +122,18 @@ var specs = map[Agent]agentSpec{
 		inputPrefix:      "❯",
 		busyMarkers:      []string{"esc to interrupt"},
 		launchArgs:       claudeLaunchArgs,
-		findLog:          findClaudeLog,
-		parseLog:         parseClaudeLog,
-		usage:            claudeUsage,
-		usagePoll:        localUsagePoll,
+		// A new worktree asks whether to trust the folder, with the cursor on
+		// "No, exit" and Down wrapping between the two choices. The cursor is
+		// moved first and Enter pressed only once it is seen on the trust
+		// choice, so a changed default can never confirm the exit.
+		startupNotices: []startupNotice{
+			{marker: "❯ Yes, I trust this folder", keys: []string{"Enter"}},
+			{marker: "❯ No, exit", keys: []string{"Down"}},
+		},
+		findLog:   findClaudeLog,
+		parseLog:  parseClaudeLog,
+		usage:     claudeUsage,
+		usagePoll: localUsagePoll,
 	},
 	AgentCodex: {
 		executable:       "codex",
@@ -149,6 +157,10 @@ var specs = map[Agent]agentSpec{
 			// A new release is offered at launch; Escape skips it this time
 			// only, leaving updating to the user.
 			{marker: "Skip until next version", keys: []string{"Escape"}},
+			// A new worktree asks whether to trust the folder; Enter takes
+			// the selected choice, so it is pressed only while that is the
+			// trust one (Escape would quit).
+			{marker: "› 1. Trust and continue", keys: []string{"Enter"}},
 		},
 		findLog:   findCodexLog,
 		parseLog:  parseCodexLog,
@@ -171,10 +183,17 @@ var specs = map[Agent]agentSpec{
 		// its own worktree; reads outside the workspace ask once instead.
 		launchArgs:   func(LaunchEnv) []string { return nil },
 		briefingFile: "GEMINI.md",
-		findLog:      findAgyLog,
-		parseLog:     parseAgyLog,
-		usage:        agyUsage,
-		usagePoll:    networkUsagePoll,
+		// A new worktree asks whether to trust the folder. Enter is pressed
+		// only while the trust choice is selected; on "No, exit" the cursor
+		// is moved up to it first.
+		startupNotices: []startupNotice{
+			{marker: "> Yes, I trust this folder", keys: []string{"Enter"}},
+			{marker: "> No, exit", keys: []string{"Up"}},
+		},
+		findLog:   findAgyLog,
+		parseLog:  parseAgyLog,
+		usage:     agyUsage,
+		usagePoll: networkUsagePoll,
 	},
 	AgentDeepSeek: {
 		executable: "reasonix",

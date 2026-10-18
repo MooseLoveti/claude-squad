@@ -100,6 +100,20 @@ func TestNoticeKeys(t *testing.T) {
 	update := "  ✨ Update available! 0.162.0 -> 0.163.0\n\n› 1. Update now (runs `sh -c 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh'`)\n  2. Skip\n  3. Skip until next version\n\n  enter continue · esc skip\n"
 	require.Equal(t, []string{"Escape"}, AgentCodex.NoticeKeys(update), "skipped this time only")
 
+	codexTrust := "  Trust this folder? Codex can read, edit, and run files here, subject to your permission settings.\n› 1. Trust and continue\n  2. Quit\n  enter continue · esc quit\n"
+	require.Equal(t, []string{"Enter"}, AgentCodex.NoticeKeys(codexTrust))
+	require.Nil(t, AgentCodex.NoticeKeys("  Trust this folder?\n  1. Trust and continue\n› 2. Quit\n"), "Enter would quit")
+
+	claudeTrust := " Quick safety check: Is this a project you created or one you trust?\n Security guide\n ❯ No, exit\n   Yes, I trust this folder\n Enter to confirm · Esc to cancel\n"
+	require.Equal(t, []string{"Down"}, AgentClaude.NoticeKeys(claudeTrust), "move to the trust choice first")
+	claudeTrust = strings.Replace(strings.Replace(claudeTrust, "❯ No", "  No", 1), "  Yes", "❯ Yes", 1)
+	require.Equal(t, []string{"Enter"}, AgentClaude.NoticeKeys(claudeTrust), "confirm once it is selected")
+
+	agyTrust := "Do you trust the contents of this project?\nAntigravity CLI requires permission to read, edit, and execute files here.\n> Yes, I trust this folder\n  No, exit\n  ↑/↓ Navigate · enter Confirm\n"
+	require.Equal(t, []string{"Enter"}, AgentAntigravity.NoticeKeys(agyTrust))
+	agyTrust = strings.Replace(strings.Replace(agyTrust, "> Yes", "  Yes", 1), "  No, exit", "> No, exit", 1)
+	require.Equal(t, []string{"Up"}, AgentAntigravity.NoticeKeys(agyTrust), "Enter would exit")
+
 	trust := "In a trusted folder, edits and shell commands run without asking, here and in `reasonix run`:\n/wt/deepseek\n" +
 		"Trust this folder? (`reasonix trust --revoke` undoes it) [y/N]: "
 	require.Equal(t, []string{"y", "Enter"}, AgentDeepSeek.NoticeKeys(trust))
