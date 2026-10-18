@@ -27,7 +27,17 @@ const (
 	agentOption = "@cs_agent"
 	titleOption = "@cs_title"
 	noteOption  = "@cs_note"
+	colorOption = "@cs_color"
+
+	// Theme colors of the dashboard chrome.
+	backgroundColor = "#1A1033"
+	accentColor     = "#FF5FD7"
+	noteColor       = "#FFD75F"
+	idleBorderColor = "#3A3A5A"
 )
+
+// rainbow colors the title letters in the status bar.
+var rainbow = []string{"#FF5F87", "#FF8700", "#FFD700", "#5FFF87", "#00D7FF", "#AF87FF"}
 
 // Pane is one pane of the dashboard.
 type Pane struct {
@@ -35,6 +45,7 @@ type Pane struct {
 	// Agent is the agent's Name, empty for the control panel.
 	Agent   string
 	Title   string
+	Color   string
 	Dir     string
 	Command string
 }
@@ -121,6 +132,9 @@ func (t *Tmux) Create(panes []Pane, width, height int, self string) error {
 		if err := t.setPaneOption(ids[i], titleOption, p.Title); err != nil {
 			return err
 		}
+		if err := t.setPaneOption(ids[i], colorOption, p.Color); err != nil {
+			return err
+		}
 		if p.Agent != "" {
 			if err := t.setPaneOption(ids[i], agentOption, p.Agent); err != nil {
 				return err
@@ -140,6 +154,30 @@ func (t *Tmux) Create(panes []Pane, width, height int, self string) error {
 	return nil
 }
 
+// Restyle applies this version's look to a running dashboard: every pane's
+// title and color from panes (matched by agent, the panel by having none),
+// and the server's options and key bindings.
+func (t *Tmux) Restyle(panes []Pane, self string) error {
+	running, err := t.Panes()
+	if err != nil {
+		return err
+	}
+	for _, state := range running {
+		for _, p := range panes {
+			if p.Agent != state.Agent {
+				continue
+			}
+			if err := t.setPaneOption(state.ID, titleOption, p.Title); err != nil {
+				return err
+			}
+			if err := t.setPaneOption(state.ID, colorOption, p.Color); err != nil {
+				return err
+			}
+		}
+	}
+	return t.configure(self)
+}
+
 func (t *Tmux) configure(self string) error {
 	hook := fmt.Sprintf(`run-shell "%s hook enter #{pane_id}"`, shellQuote(self))
 	settings := [][]string{
@@ -153,12 +191,19 @@ func (t *Tmux) configure(self string) error {
 		// A pane whose agent exits stays, so it can be restarted from the panel.
 		{"set-option", "-g", "remain-on-exit", "on"},
 		{"set-option", "-g", "pane-border-status", "top"},
+		{"set-option", "-g", "pane-border-lines", "heavy"},
+		{"set-option", "-g", "pane-border-style", "fg=" + idleBorderColor},
+		{"set-option", "-g", "pane-active-border-style", "fg=" + accentColor + ",bold"},
+		// The active pane's title is its own color as a filled badge.
 		{"set-option", "-g", "pane-border-format",
-			"#{?pane_active,#[reverse],} #{" + titleOption + "}#{?pane_dead, (停止),} #[default] #{" + noteOption + "}"},
-		{"set-option", "-g", "status-left", " claude-squad "},
-		{"set-option", "-g", "status-left-length", "20"},
-		{"set-option", "-g", "status-right", " Shift+矢印/クリックで切替 · C-b z 拡大 · C-b d デタッチ "},
-		{"set-option", "-g", "status-right-length", "60"},
+			"#{?pane_active,#[fg=" + backgroundColor + "#,bg=#{" + colorOption + "}#,bold] ▶,#[fg=#{" + colorOption + "}#,bold] }" +
+				" #{" + titleOption + "}#{?pane_dead, 💀停止,} #[default] #[fg=" + noteColor + ",bold]#{" + noteOption + "}#[default]"},
+		{"set-option", "-g", "status-style", "bg=" + backgroundColor + ",fg=#E0E0FF"},
+		{"set-option", "-g", "status-left", statusTitle()},
+		{"set-option", "-g", "status-left-length", "40"},
+		{"set-option", "-g", "status-right", "#[fg=#AF87FF] Shift+矢印 / クリックで移動 #[fg=" + idleBorderColor + "]│#[fg=#00D7FF] C-b z 拡大 #[fg=" + idleBorderColor + "]│#[fg=#5FFF87] C-b d デタッチ "},
+		{"set-option", "-g", "status-right-length", "80"},
+		{"set-option", "-g", "message-style", "bg=" + accentColor + ",fg=" + backgroundColor + ",bold"},
 		{"set-option", "-g", "window-status-format", ""},
 		{"set-option", "-g", "window-status-current-format", ""},
 		// Enter on an agent pane goes through the hook, which diverts input
@@ -248,6 +293,22 @@ func (t *Tmux) Backspace(pane string, n int) error {
 		return nil
 	}
 	return t.run("send-keys", "-t", pane, "-N", strconv.Itoa(n), "BSpace")
+}
+
+// statusTitle is " ✦ CLAUDE SQUAD ✦ " with every letter in a rainbow color.
+func statusTitle() string {
+	var b strings.Builder
+	b.WriteString("#[bold]")
+	for i, r := range []rune(" ✦ CLAUDE SQUAD ✦ ") {
+		fmt.Fprintf(&b, "#[fg=%s]%c", rainbow[i%len(rainbow)], r)
+	}
+	b.WriteString("#[default] ")
+	return b.String()
+}
+
+// Toast flashes a message on the status line for a few seconds.
+func (t *Tmux) Toast(text string) error {
+	return t.run("display-message", "-d", "3000", strings.ReplaceAll(text, "#", "##"))
 }
 
 // SetNote shows a note next to the pane's title.

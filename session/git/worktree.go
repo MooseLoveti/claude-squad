@@ -27,22 +27,9 @@ type GitWorktree struct {
 	sessionName string
 	// Branch name for the worktree
 	branchName string
-	// Base commit hash for the worktree
-	baseCommitSHA string
 	// isExistingBranch is true if the branch existed before the session was created.
 	// When true, the branch will not be deleted on cleanup.
 	isExistingBranch bool
-}
-
-func NewGitWorktreeFromStorage(repoPath string, worktreePath string, sessionName string, branchName string, baseCommitSHA string, isExistingBranch bool) *GitWorktree {
-	return &GitWorktree{
-		repoPath:         repoPath,
-		worktreePath:     worktreePath,
-		sessionName:      sessionName,
-		branchName:       branchName,
-		baseCommitSHA:    baseCommitSHA,
-		isExistingBranch: isExistingBranch,
-	}
 }
 
 // resolveWorktreePaths resolves the repo root and generates a unique worktree path for the given branch name.
@@ -93,9 +80,4 @@ func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, bra
 // GetWorktreePath returns the path to the worktree
 func (g *GitWorktree) GetWorktreePath() string {
 	return g.worktreePath
-}
-
-// GetBaseCommitSHA returns the base commit SHA for the worktree
-func (g *GitWorktree) GetBaseCommitSHA() string {
-	return g.baseCommitSHA
 }

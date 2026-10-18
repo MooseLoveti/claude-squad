@@ -76,8 +76,9 @@ func Inspect(dir string) (Kind, string, error) {
 	return KindGit, root, nil
 }
 
-// InitialCommit gives a new repository an empty first commit to branch from.
-// It works before git has an identity configured, using a placeholder one.
+// InitialCommit gives a new repository its first commit to branch from, of
+// whatever is staged, possibly nothing. It works before git has an identity
+// configured, using a placeholder one.
 func InitialCommit(root string) error {
 	args := []string{"-c", "commit.gpgsign=false"}
 	if email, _ := gitOutput(root, "config", "user.email"); email == "" {
@@ -87,12 +88,37 @@ func InitialCommit(root string) error {
 	return err
 }
 
-// InitRepo makes an existing directory a git repository with a first commit.
+// ErrHomeRepo refuses to make the home directory, or a directory above it, a
+// repository: its first commit would sweep up everything the user has.
+var ErrHomeRepo = errors.New("ホームディレクトリやその上のフォルダは git にできません。共有で開くか、作業用のサブフォルダを選んでください")
+
+// InitRepo makes an existing directory a git repository whose first commit
+// holds the files already there, so every agent's worktree starts with them.
 func InitRepo(dir string) error {
+	if containsHome(dir) {
+		return ErrHomeRepo
+	}
 	if _, err := gitOutput(dir, "init"); err != nil {
 		return err
 	}
+	if _, err := gitOutput(dir, "add", "-A"); err != nil {
+		return err
+	}
 	return InitialCommit(dir)
+}
+
+// containsHome reports whether dir is the home directory or one above it.
+func containsHome(dir string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(abs, home)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // CreateDir makes a new directory as a git repository with an empty first

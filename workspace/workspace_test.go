@@ -101,6 +101,33 @@ func TestCreateDir(t *testing.T) {
 	require.ErrorContains(t, err, "空ではありません")
 }
 
+func TestInitRepoCommitsTheFilesAlreadyThere(t *testing.T) {
+	home := isolate(t)
+	dir := filepath.Join(t.TempDir(), "notes")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "sub", "b.txt"), []byte("b"), 0o644))
+	require.NoError(t, InitRepo(dir))
+	require.Equal(t, "a.txt\nsub/b.txt", runGit(t, dir, "ls-files"))
+
+	ws, err := Open(dir, false, testConfig())
+	require.NoError(t, err)
+	for _, m := range ws.Members {
+		require.FileExists(t, filepath.Join(m.Dir, "sub", "b.txt"), "every worktree starts with the files")
+	}
+
+	require.ErrorIs(t, InitRepo(home), ErrHomeRepo)
+	require.ErrorIs(t, InitRepo(filepath.Dir(home)), ErrHomeRepo, "a directory above home holds it too")
+	require.NoDirExists(t, filepath.Join(home, ".git"))
+	project := filepath.Join(home, "project")
+	require.NoError(t, os.MkdirAll(project, 0o755))
+	require.NoError(t, InitRepo(project), "a folder inside home is fine")
+	sibling := home + "-work"
+	require.NoError(t, os.MkdirAll(sibling, 0o755))
+	t.Cleanup(func() { os.RemoveAll(sibling) })
+	require.NoError(t, InitRepo(sibling), "a name that only starts like home is not above it")
+}
+
 func TestScratchDir(t *testing.T) {
 	configDir := t.TempDir()
 	dir, err := ScratchDir(configDir, time.Date(2026, 10, 5, 18, 17, 3, 0, time.Local))
@@ -164,12 +191,6 @@ func TestOpenSharedDirectory(t *testing.T) {
 		require.Equal(t, dir, m.Dir)
 		require.Empty(t, m.Branch)
 	}
-	_, _, err = ws.DiffStats(ws.Members[0])
-	require.ErrorIs(t, err, errNotGit)
-	require.ErrorIs(t, ws.Merge(ws.Members[0]), errNotGit)
-	require.ErrorIs(t, ws.Push(ws.Members[0]), errNotGit)
-	_, err = ws.DiffCommand(ws.Members[0])
-	require.ErrorIs(t, err, errNotGit)
 }
 
 func TestSaveLoadAndClose(t *testing.T) {
@@ -226,42 +247,6 @@ func TestSaveLoadAndClose(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestDiffAndMerge(t *testing.T) {
-	isolate(t)
-	for _, v := range []string{"GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"} {
-		t.Setenv(v, "test")
-	}
-	for _, v := range []string{"GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"} {
-		t.Setenv(v, "test@example.com")
-	}
-	repo := newRepo(t)
-	ws, err := Open(repo, false, testConfig())
-	require.NoError(t, err)
-	claude, _ := ws.Member("claude")
-
-	require.NoError(t, os.WriteFile(filepath.Join(claude.Dir, "new.txt"), []byte("a\nb\n"), 0o644))
-	added, removed, err := ws.DiffStats(claude)
-	require.NoError(t, err)
-	require.Equal(t, 2, added, "untracked files count")
-	require.Zero(t, removed)
-	command, err := ws.DiffCommand(claude)
-	require.NoError(t, err)
-	require.Contains(t, command, "less -R")
-
-	require.NoError(t, ws.Merge(claude))
-	require.FileExists(t, filepath.Join(repo, "new.txt"))
-	added, _, err = ws.DiffStats(claude)
-	require.NoError(t, err)
-	require.Zero(t, added, "merged work no longer shows as a diff")
-
-	// Conflicting edits stop the merge and leave it for someone to resolve.
-	codex, _ := ws.Member("codex")
-	require.NoError(t, os.WriteFile(filepath.Join(codex.Dir, "new.txt"), []byte("codex\n"), 0o644))
-	require.Error(t, ws.Merge(codex))
-	_, err = os.Stat(filepath.Join(repo, ".git", "MERGE_HEAD"))
-	require.NoError(t, err)
-}
-
 func TestParseWorktreeList(t *testing.T) {
 	out := "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\nworktree /wt/x\nHEAD def\nbranch refs/heads/t/codex\n\nworktree /wt/d\nHEAD 123\ndetached\n"
 	require.Equal(t, map[string]string{"main": "/repo", "t/codex": "/wt/x"}, parseWorktreeList(out))
@@ -270,4 +255,21 @@ func TestParseWorktreeList(t *testing.T) {
 func TestGitOutputReportsFailures(t *testing.T) {
 	_, err := gitOutput(t.TempDir(), "rev-parse", "HEAD")
 	require.ErrorContains(t, err, "git rev-parse")
+}
+
+func TestSwitchRequest(t *testing.T) {
+	dir := t.TempDir()
+	_, ok := TakeSwitch(dir)
+	require.False(t, ok)
+	require.NoError(t, RequestSwitch(filepath.Join(dir, "cfg"), "/work/next"))
+	got, ok := TakeSwitch(filepath.Join(dir, "cfg"))
+	require.True(t, ok)
+	require.Equal(t, "/work/next", got)
+	_, ok = TakeSwitch(filepath.Join(dir, "cfg"))
+	require.False(t, ok, "a request is taken once")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, switchFileName), []byte("{"), 0o644))
+	_, ok = TakeSwitch(dir)
+	require.False(t, ok, "a broken request is dropped")
+	require.NoFileExists(t, filepath.Join(dir, switchFileName))
 }

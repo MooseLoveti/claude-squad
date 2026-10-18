@@ -252,11 +252,15 @@ func claudeStatusFile(configDir string) string {
 	return filepath.Join(configDir, "usage", "claude.json")
 }
 
-// claudeLaunchArgs let Claude Code read every worktree and transcript, and
-// install `cs statusline` as its status line so its rate limits reach the
-// dashboard. --settings layers on top of the user's own settings files.
+// claudeLaunchArgs let Claude Code read every worktree and transcript, add
+// the briefing to its system prompt, and install `cs statusline` as its status
+// line so its rate limits reach the dashboard. --settings layers on top of the
+// user's own settings files.
 func claudeLaunchArgs(env LaunchEnv) []string {
 	args := []string{"--add-dir", env.SharedDir}
+	if env.Briefing != "" {
+		args = append(args, "--append-system-prompt", env.Briefing)
+	}
 	if env.Self != "" {
 		settings, _ := json.Marshal(map[string]any{
 			"statusLine": map[string]string{"type": "command", "command": shellQuote(env.Self) + " statusline"},

@@ -58,7 +58,7 @@ func newTestModel(t *testing.T, state *config.State) *model {
 	if state == nil {
 		state = config.LoadStateFrom(filepath.Join(home, "state.json"))
 	}
-	m := newModel(cfg, state)
+	m := newModel(cfg, state, "")
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	return m
 }
@@ -81,7 +81,7 @@ func TestOpeningAPlainDirectoryAsksHowToUseIt(t *testing.T) {
 	m.open.SetValue(dir)
 	press(m, "enter")
 	require.Equal(t, confirmNotGit, m.confirm)
-	require.Contains(t, m.View(), "git リポジトリではありません")
+	require.Contains(t, m.View(), "git で管理されていないフォルダです")
 
 	press(m, "x")
 	require.Equal(t, confirmNone, m.confirm, "any other key goes back")
@@ -92,6 +92,7 @@ func TestOpeningAPlainDirectoryAsksHowToUseIt(t *testing.T) {
 
 	m = newTestModel(t, nil)
 	other := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(other, "notes.txt"), []byte("x"), 0o644))
 	selectKind(t, m, itemOpen)
 	m.open.SetValue(other)
 	press(m, "enter", "g")
@@ -99,6 +100,21 @@ func TestOpeningAPlainDirectoryAsksHowToUseIt(t *testing.T) {
 	kind, _, err := workspace.Inspect(other)
 	require.NoError(t, err)
 	require.Equal(t, workspace.KindGit, kind, "g makes it a repository with a commit")
+	files, err := exec.Command("git", "-C", other, "ls-files").Output()
+	require.NoError(t, err)
+	require.Equal(t, "notes.txt\n", string(files), "the first commit holds the files already there")
+}
+
+func TestHomeCannotBecomeARepository(t *testing.T) {
+	m := newTestModel(t, nil)
+	home := os.Getenv("HOME")
+	selectKind(t, m, itemOpen)
+	m.open.SetValue(home)
+	press(m, "enter", "g")
+	require.Nil(t, m.choice)
+	require.Contains(t, m.View(), "ホームディレクトリやその上のフォルダは git にできません")
+	_, err := os.Stat(filepath.Join(home, ".git"))
+	require.True(t, os.IsNotExist(err), "nothing is created")
 }
 
 func TestOpeningARepositoryWithoutCommits(t *testing.T) {
@@ -148,7 +164,7 @@ func TestScratchMakesAThrowawayDirectory(t *testing.T) {
 	require.Contains(t, m.choice.Dir, filepath.Join(".claude-squad", "scratch"))
 }
 
-func TestResumeAndRecentItems(t *testing.T) {
+func TestRecentItems(t *testing.T) {
 	home := isolate(t)
 	projects := filepath.Join(home, "src")
 	for _, name := range []string{"beta", "alpha", "notrepo"} {
@@ -162,8 +178,8 @@ func TestResumeAndRecentItems(t *testing.T) {
 	state.Recent = []string{recent, filepath.Join(home, "gone"), filepath.Join(projects, "beta")}
 	state.Workspace = []byte(`{"dir":"/repo","kind":"shared","scratch":true}`)
 
-	m := newModel(&config.Config{ProjectsDir: projects}, state)
-	require.Equal(t, itemResume, m.items[0].kind)
+	m := newModel(&config.Config{ProjectsDir: projects}, state, "")
+	require.Equal(t, itemOpen, m.items[0].kind, "a saved but stopped workspace is not offered to resume")
 	var dirs []string
 	for _, it := range m.items {
 		if it.kind == itemDir {
@@ -172,9 +188,35 @@ func TestResumeAndRecentItems(t *testing.T) {
 	}
 	require.Equal(t, []string{recent, filepath.Join(projects, "beta"), filepath.Join(projects, "alpha")}, dirs,
 		"recent first, missing ones dropped, then repositories under the projects directory")
+}
 
+func TestRunningDashboardIsOfferedFirst(t *testing.T) {
+	home := isolate(t)
+	running := t.TempDir()
+	m := newModel(&config.Config{ProjectsDir: filepath.Join(home, "src")}, config.LoadStateFrom(filepath.Join(home, "state.json")), running)
+	require.Equal(t, itemAttach, m.items[0].kind)
+	require.Contains(t, m.View(), "開いているワークスペースに戻る")
 	press(m, "enter")
-	require.Equal(t, &Choice{Dir: "/repo", Scratch: true}, m.choice)
+	require.Equal(t, &Choice{Dir: running, Attach: true}, m.choice)
+}
+
+func TestOpeningElsewhereConfirmsStoppingTheRunningDashboard(t *testing.T) {
+	home := isolate(t)
+	m := newModel(&config.Config{ProjectsDir: filepath.Join(home, "src")}, config.LoadStateFrom(filepath.Join(home, "state.json")), "/running")
+	selectKind(t, m, itemScratch)
+	press(m, "enter")
+	require.Equal(t, confirmSwitch, m.confirm)
+	require.Nil(t, m.choice)
+	require.Contains(t, m.View(), "/running で動いているAIを止めて")
+
+	press(m, "n")
+	require.Nil(t, m.choice, "anything but y keeps the running dashboard")
+	require.Equal(t, confirmNone, m.confirm)
+
+	press(m, "enter", "y")
+	require.NotNil(t, m.choice)
+	require.True(t, m.choice.Scratch)
+	require.False(t, m.choice.Attach)
 }
 
 func TestMouseClickActivatesAnItem(t *testing.T) {

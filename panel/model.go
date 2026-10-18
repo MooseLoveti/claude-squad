@@ -7,6 +7,7 @@ import (
 	"claude-squad/config"
 	"claude-squad/dashboard"
 	"claude-squad/log"
+	"claude-squad/picker"
 	"claude-squad/relay"
 	"claude-squad/workspace"
 	"context"
@@ -21,14 +22,16 @@ import (
 
 const (
 	statusInterval = time.Second
-	diffInterval   = 5 * time.Second
-	// messageLifetime is how long a one-line notice stays in the footer.
+	// paneInterval is how often stopped agents are looked for.
+	paneInterval = 5 * time.Second
+	// frameInterval paces the animations.
+	frameInterval = 150 * time.Millisecond
+	// messageLifetime is how long a one-line notice stays above the footer.
 	messageLifetime = 8 * time.Second
-	meterCells      = 8
-	// labelWidth aligns the agent names in the usage and agent sections.
-	labelWidth = 12
-	// broadcastHint fills the empty broadcast box.
-	broadcastHint = "ここをクリックして全AIに同じ文を送る（Enterで送信）"
+	// bannerLifetime is how long a celebration stays up.
+	bannerLifetime = 6 * time.Second
+	// freshLogLifetime is how long a new log line stays highlighted.
+	freshLogLifetime = 3 * time.Second
 )
 
 type usageState struct {
@@ -38,9 +41,19 @@ type usageState struct {
 	gen int
 }
 
-type diffState struct {
-	added, removed int
-	err            error
+// switchPlan is a folder chosen to work in next, waiting for confirmation.
+type switchPlan struct {
+	dir  string
+	kind workspace.Kind
+	// noCommits marks a repository that needs a first commit for worktrees.
+	noCommits bool
+}
+
+// banner is the celebration line.
+type banner struct {
+	text  string
+	warn  bool
+	until time.Time
 }
 
 // Model is the control panel's bubbletea model.
@@ -52,14 +65,21 @@ type Model struct {
 	members   []Member
 	env       relay.LaunchEnv
 	configDir string
+	// toast flashes a message on the dashboard's status line.
+	toast func(string)
+	// pickFolder opens the desktop's folder dialog.
+	pickFolder func(ctx context.Context, title, initial string) (string, error)
 
 	width, height int
 	input         textinput.Model
 	usage         map[relay.Agent]*usageState
-	diffs         map[relay.Agent]diffState
 	dead          map[relay.Agent]bool
 	status        Status
 	now           time.Time
+	frame         int
+	// lastSeq is the newest relay log entry already celebrated.
+	lastSeq int
+	banner  banner
 
 	message   string
 	messageAt time.Time
@@ -67,17 +87,21 @@ type Model struct {
 	// is set when closing must skip worktrees with uncommitted changes.
 	closing bool
 	force   bool
+	// switching is set while the user confirms working in another folder.
+	switching *switchPlan
 
 	zones []zone
 }
 
 type statusTickMsg struct{}
 
-type diffTickMsg struct{}
+type frameMsg struct{}
 
-type diffMsg struct {
-	diffs map[relay.Agent]diffState
-	dead  map[relay.Agent]bool
+type paneTickMsg struct{}
+
+// panesMsg reports which agents' programs have exited.
+type panesMsg struct {
+	dead map[relay.Agent]bool
 }
 
 type usageTickMsg struct {
@@ -92,24 +116,30 @@ type usageMsg struct {
 	err   error
 }
 
-// noticeMsg shows the outcome of a button in the footer.
+// noticeMsg shows the outcome of a button above the footer.
 type noticeMsg struct {
 	text string
 	err  error
 }
 
-// closeFailedMsg means closing the workspace kept some worktrees.
+// closeFailedMsg means closing the workspace needs confirming.
 type closeFailedMsg struct{ err error }
 
+// folderPickedMsg is the folder dialog's result.
+type folderPickedMsg struct {
+	dir string
+	err error
+}
+
 func newModel(ws *workspace.Workspace, state *config.State, tmux *dashboard.Tmux, r *Relay, members []Member,
-	env relay.LaunchEnv, configDir string) *Model {
+	env relay.LaunchEnv, configDir string, toast func(string)) *Model {
 	input := textinput.New()
-	input.Prompt = "> "
+	input.Prompt = "› "
 	m := &Model{
 		ws: ws, state: state, tmux: tmux, relay: r, members: members, env: env, configDir: configDir,
+		toast: toast, pickFolder: picker.Folder,
 		input: input,
 		usage: map[relay.Agent]*usageState{},
-		diffs: map[relay.Agent]diffState{},
 		dead:  map[relay.Agent]bool{},
 		now:   time.Now(),
 	}
@@ -120,7 +150,7 @@ func newModel(ws *workspace.Workspace, state *config.State, tmux *dashboard.Tmux
 }
 
 func (m *Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.statusTick(), m.refreshDiffs()}
+	cmds := []tea.Cmd{m.statusTick(), m.frameTick(), m.refreshPanes()}
 	for _, member := range m.members {
 		cmds = append(cmds, m.fetchUsage(member.Agent, 0))
 	}
@@ -129,6 +159,10 @@ func (m *Model) Init() tea.Cmd {
 
 func (m *Model) statusTick() tea.Cmd {
 	return tea.Tick(statusInterval, func(time.Time) tea.Msg { return statusTickMsg{} })
+}
+
+func (m *Model) frameTick() tea.Cmd {
+	return tea.Tick(frameInterval, func(time.Time) tea.Msg { return frameMsg{} })
 }
 
 func (m *Model) program(agent relay.Agent) string {
@@ -152,23 +186,16 @@ func (m *Model) refreshUsage() tea.Cmd {
 		state.gen++
 		cmds = append(cmds, m.fetchUsage(agent, state.gen))
 	}
-	m.notice("使用量を更新しています…", nil)
+	m.notice("🔄 使用量を更新中…", nil)
 	return tea.Batch(cmds...)
 }
 
-func (m *Model) refreshDiffs() tea.Cmd {
-	ws, tmux, members := m.ws, m.tmux, m.members
+func (m *Model) refreshPanes() tea.Cmd {
+	tmux := m.tmux
 	return func() tea.Msg {
-		msg := diffMsg{diffs: map[relay.Agent]diffState{}, dead: map[relay.Agent]bool{}}
-		if ws.Kind == workspace.KindGit {
-			for _, member := range members {
-				wm, ok := ws.Member(member.Agent.Name())
-				if !ok {
-					continue
-				}
-				added, removed, err := ws.DiffStats(wm)
-				msg.diffs[member.Agent] = diffState{added: added, removed: removed, err: err}
-			}
+		msg := panesMsg{dead: map[relay.Agent]bool{}}
+		if tmux == nil {
+			return msg
 		}
 		if panes, err := tmux.Panes(); err == nil {
 			for _, p := range panes {
@@ -192,19 +219,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.input.Width = max(m.width-12, 10)
+		m.input.Width = max(m.width-20, 10)
+	case frameMsg:
+		m.frame++
+		m.now = time.Now()
+		return m, m.frameTick()
 	case statusTickMsg:
 		m.now = time.Now()
 		m.status = m.relay.Status()
+		m.celebrateNew()
 		if m.message != "" && m.now.Sub(m.messageAt) > messageLifetime {
 			m.message = ""
 		}
 		return m, m.statusTick()
-	case diffMsg:
-		m.diffs, m.dead = msg.diffs, msg.dead
-		return m, tea.Tick(diffInterval, func(time.Time) tea.Msg { return diffTickMsg{} })
-	case diffTickMsg:
-		return m, m.refreshDiffs()
+	case panesMsg:
+		m.dead = msg.dead
+		return m, tea.Tick(paneInterval, func(time.Time) tea.Msg { return paneTickMsg{} })
+	case paneTickMsg:
+		return m, m.refreshPanes()
 	case usageMsg:
 		state := m.usage[msg.agent]
 		if state == nil || msg.gen != state.gen {
@@ -219,9 +251,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case noticeMsg:
 		m.notice(msg.text, msg.err)
+	case folderPickedMsg:
+		m.planSwitch(msg)
 	case closeFailedMsg:
 		m.closing, m.force = true, true
-		m.notice("まだ閉じていません", msg.err)
+		m.notice("🚧 まだ閉じていません", msg.err)
 	case tea.MouseMsg:
 		return m, m.handleMouse(msg)
 	case tea.KeyMsg:
@@ -230,16 +264,60 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// celebrateNew shows the relay events since the last status, the most
+// recent one as a banner.
+func (m *Model) celebrateNew() {
+	for _, e := range m.status.Log {
+		if e.Seq <= m.lastSeq {
+			continue
+		}
+		m.lastSeq = e.Seq
+		m.celebrate(e)
+	}
+}
+
+func (m *Model) celebrate(e LogEntry) {
+	who := e.Agent.Emoji() + " " + e.Agent.Label()
+	b := banner{until: m.now.Add(bannerLifetime)}
+	switch e.Kind {
+	case EventAsk:
+		b.text = fmt.Sprintf("📤 %s が %d人に相談！", who, e.Count)
+	case EventAnswer:
+		b.text = fmt.Sprintf("📥 %s が回答！", who)
+	case EventDeliver:
+		b.text = fmt.Sprintf("🎉 %s に意見が届いた！", who)
+		m.flash(b.text)
+	case EventBroadcast:
+		b.text = "📣 全員に一斉送信！"
+	case EventWarn:
+		b.text, b.warn = "🚨 "+e.Text, true
+	default:
+		return
+	}
+	m.banner = b
+}
+
+func (m *Model) flash(text string) {
+	if m.toast != nil {
+		m.toast(text)
+	}
+}
+
 func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 		return nil
 	}
-	for _, z := range m.zones {
-		if z.row == msg.Y && msg.X >= z.x0 && msg.X < z.x1 {
-			return z.action()
+	// A button on a clickable row wins over the row: the narrowest zone does.
+	var hit *zone
+	for i, z := range m.zones {
+		if z.row == msg.Y && msg.X >= z.x0 && msg.X < z.x1 && z.action != nil && (hit == nil || z.x1-z.x0 < hit.x1-hit.x0) {
+			hit = &m.zones[i]
 		}
 	}
-	return nil
+	if hit == nil {
+		return nil
+	}
+	return hit.action()
 }
 
 func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
@@ -280,7 +358,7 @@ func (m *Model) broadcast() tea.Cmd {
 	r := m.relay
 	return func() tea.Msg {
 		r.Broadcast(text)
-		return noticeMsg{text: "全員に送信しました"}
+		return nil
 	}
 }
 
@@ -289,7 +367,7 @@ func (m *Model) toggleAutoRelay() tea.Cmd {
 	m.relay.SetAutoRelay(on)
 	m.status = m.relay.Status()
 	if on {
-		m.notice(fmt.Sprintf("自動Relay ON: AIの返答の@タグも相手に聞きます（%d回まで）", autoRelayLimit), nil)
+		m.notice(fmt.Sprintf("⚡ 自動Relay ON: AIの返答の@タグも相手に聞きます（%d回まで）", autoRelayLimit), nil)
 	} else {
 		m.notice("自動Relay OFF", nil)
 	}
@@ -316,53 +394,70 @@ func (m *Model) detach() tea.Cmd {
 	}
 }
 
-func (m *Model) showDiff(member Member) tea.Cmd {
-	ws, tmux := m.ws, m.tmux
-	return func() tea.Msg {
-		wm, _ := ws.Member(member.Agent.Name())
-		command, err := ws.DiffCommand(wm)
-		if err == nil {
-			err = tmux.Popup(wm.Dir, command)
-		}
-		if err != nil {
-			return noticeMsg{text: member.Agent.Label() + " の差分を開けませんでした", err: err}
-		}
-		return nil
-	}
-}
-
-func (m *Model) merge(member Member) tea.Cmd {
-	ws := m.ws
-	m.notice(member.Agent.Label()+" のブランチをマージしています…", nil)
-	return func() tea.Msg {
-		wm, _ := ws.Member(member.Agent.Name())
-		if err := ws.Merge(wm); err != nil {
-			return noticeMsg{text: member.Agent.Label() + " のマージを中断しました（" + ws.Dir + " で解決してください）", err: err}
-		}
-		return noticeMsg{text: member.Agent.Label() + " のブランチをマージしました"}
-	}
-}
-
-func (m *Model) push(member Member) tea.Cmd {
-	ws := m.ws
-	m.notice(member.Agent.Label()+" のブランチを push しています…", nil)
-	return func() tea.Msg {
-		wm, _ := ws.Member(member.Agent.Name())
-		if err := ws.Push(wm); err != nil {
-			return noticeMsg{text: member.Agent.Label() + " を push できませんでした", err: err}
-		}
-		return noticeMsg{text: member.Agent.Label() + " のブランチを push しました"}
-	}
-}
-
 func (m *Model) restart(member Member) tea.Cmd {
 	ws, tmux, env := m.ws, m.tmux, m.env
 	return func() tea.Msg {
 		wm, _ := ws.Member(member.Agent.Name())
-		if err := tmux.Respawn(member.Pane, wm.Dir, dashboard.AgentCommand(wm, env)); err != nil {
+		if err := tmux.Respawn(member.Pane, wm.Dir, dashboard.AgentCommand(ws, wm, env)); err != nil {
 			return noticeMsg{text: member.Agent.Label() + " を再起動できませんでした", err: err}
 		}
-		return noticeMsg{text: member.Agent.Label() + " を再起動しました"}
+		return noticeMsg{text: "🔄 " + member.Agent.Label() + " を再起動しました"}
+	}
+}
+
+// openFolder opens the folder dialog, starting at the current workspace.
+func (m *Model) openFolder() tea.Cmd {
+	pick, dir := m.pickFolder, m.ws.Dir
+	m.closing, m.force, m.switching = false, false, nil
+	m.notice("📂 フォルダを選んでください（Windows のダイアログが開きます）", nil)
+	return func() tea.Msg {
+		chosen, err := pick(context.Background(), "claude-squad で作業するフォルダを選んでください", dir)
+		return folderPickedMsg{dir: chosen, err: err}
+	}
+}
+
+// planSwitch turns the chosen folder into a switch to confirm.
+func (m *Model) planSwitch(msg folderPickedMsg) {
+	switch {
+	case errors.Is(msg.err, picker.ErrCancelled):
+		m.notice("フォルダ選択をやめました", nil)
+		return
+	case msg.err != nil:
+		m.notice("フォルダを選べませんでした", msg.err)
+		return
+	}
+	kind, root, err := workspace.Inspect(msg.dir)
+	noCommits := errors.Is(err, workspace.ErrNoCommits)
+	if err != nil && !noCommits {
+		m.notice("そのフォルダは開けません", err)
+		return
+	}
+	if root == m.ws.Dir {
+		m.notice("📂 今と同じフォルダです", nil)
+		return
+	}
+	m.message = ""
+	m.switching = &switchPlan{dir: root, kind: kind, noCommits: noCommits}
+}
+
+// switchTo stops this dashboard and has the attached claude-squad reopen it
+// on the planned folder, after preparing the folder with prepare.
+func (m *Model) switchTo(prepare func(string) error) tea.Cmd {
+	plan, tmux, configDir := m.switching, m.tmux, m.configDir
+	m.switching = nil
+	return func() tea.Msg {
+		if prepare != nil {
+			if err := prepare(plan.dir); err != nil {
+				return noticeMsg{text: "切り替えの準備に失敗しました", err: err}
+			}
+		}
+		if err := workspace.RequestSwitch(configDir, plan.dir); err != nil {
+			return noticeMsg{text: "切り替えられませんでした", err: err}
+		}
+		if err := tmux.Kill(); err != nil {
+			return noticeMsg{text: "切り替えられませんでした", err: err}
+		}
+		return nil
 	}
 }
 
@@ -382,167 +477,6 @@ func (m *Model) closeWorkspace() tea.Cmd {
 		}
 		return nil
 	}
-}
-
-func (m *Model) View() string {
-	if m.width == 0 || m.height == 0 {
-		return ""
-	}
-	s := &screen{width: m.width}
-	m.viewTitle(s)
-	m.viewUsage(s)
-	m.viewAgents(s)
-	m.viewBroadcast(s)
-	footer := m.footer()
-	m.viewRelay(s, m.height-len(s.rows)-len(footer))
-	s.rows = append(s.rows, footer...)
-	view, zones := s.render(m.height)
-	m.zones = zones
-	return view
-}
-
-func (m *Model) viewTitle(s *screen) {
-	kind := "git worktree"
-	switch {
-	case m.ws.Scratch:
-		kind = "使い捨て"
-	case m.ws.Kind == workspace.KindShared:
-		kind = "共有ディレクトリ"
-	}
-	s.row().add("claude-squad ", titleStyle).add(m.ws.Dir+" ", dimStyle).add("("+kind+")", dimStyle)
-}
-
-func (m *Model) viewUsage(s *screen) {
-	s.header("残り使用量", func(r *row) { r.button("更新", buttonStyle, m.refreshUsage) })
-	for _, member := range m.members {
-		state := m.usage[member.Agent]
-		r := s.row().plain(padRight(member.Agent.Label(), labelWidth))
-		switch {
-		case state.err != nil && errors.Is(state.err, relay.ErrNoUsage):
-			r.add("まだ取得していません（一度やり取りすると表示）", dimStyle)
-			continue
-		case state.err != nil:
-			r.add("取得できません: "+state.err.Error(), errorStyle)
-			continue
-		}
-		// Two windows fit on a line; more wrap under the name.
-		for i, w := range state.usage.Windows {
-			if i > 0 && i%2 == 0 {
-				r = s.row().plain(strings.Repeat(" ", labelWidth))
-			}
-			r.plain(w.Name+" ").plain(meter(w.Remaining, meterCells)).
-				plain(fmt.Sprintf(" %3.0f%% ", w.Remaining*100)).add(padRight(countdown(w.ResetsAt, m.now), 10)+" ", dimStyle)
-		}
-		if a := age(state.usage.Updated, m.now); a != "" {
-			r.add(a, dimStyle)
-		}
-	}
-}
-
-func (m *Model) viewAgents(s *screen) {
-	s.header("エージェント")
-	for _, member := range m.members {
-		member := member
-		r := s.row()
-		switch {
-		case m.dead[member.Agent]:
-			r.add("■ ", errorStyle).plain(padRight(member.Agent.Label(), labelWidth)).add(padRight("停止", 7), errorStyle)
-		case m.status.Busy[member.Agent]:
-			r.add("● ", busyStyle).plain(padRight(member.Agent.Label(), labelWidth)).add(padRight("作業中", 7), busyStyle)
-		default:
-			r.add("○ ", idleStyle).plain(padRight(member.Agent.Label(), labelWidth)).add(padRight("待機", 7), idleStyle)
-		}
-		if m.ws.Kind == workspace.KindGit {
-			d := m.diffs[member.Agent]
-			if d.err == nil {
-				r.add(fmt.Sprintf("+%d", d.added), addedStyle).plain(" ").add(padRight(fmt.Sprintf("-%d", d.removed), 6), removedStyle)
-			} else {
-				r.plain(padRight("", 8))
-			}
-			r.button("差分", buttonStyle, func() tea.Cmd { return m.showDiff(member) })
-			r.button("マージ", buttonStyle, func() tea.Cmd { return m.merge(member) })
-			r.button("push", buttonStyle, func() tea.Cmd { return m.push(member) })
-		}
-		r.button("再起動", buttonStyle, func() tea.Cmd { return m.restart(member) })
-	}
-}
-
-func (m *Model) viewBroadcast(s *screen) {
-	s.header("一斉送信")
-	r := s.row()
-	focus := func() tea.Cmd { return m.input.Focus() }
-	r.zones = append(r.zones, zone{x0: 0, x1: m.width, action: focus})
-	if m.input.Focused() || m.input.Value() != "" {
-		r.plain(m.input.View())
-	} else {
-		// textinput's own placeholder breaks on wide characters, so the hint
-		// is drawn here.
-		r.plain(m.input.Prompt).add(broadcastHint, dimStyle)
-	}
-	r = s.row()
-	r.button("全員に送信", buttonStyle, m.broadcast)
-	r.add("@タグはAIのペインで先頭に書く（例: @codex どう思う？ / @all）", dimStyle)
-}
-
-func (m *Model) viewRelay(s *screen, rows int) {
-	label := "自動Relay: OFF"
-	style := buttonStyle
-	if m.status.AutoRelay {
-		label = fmt.Sprintf("自動Relay: ON (%d/%d)", m.status.AutoCount, autoRelayLimit)
-		style = activeButtonStyle
-	}
-	s.header("Relay", func(r *row) {
-		r.button(label, style, m.toggleAutoRelay)
-		r.button("ログ全文", buttonStyle, m.openLog)
-	})
-	rows--
-	if rows <= 0 {
-		return
-	}
-	lines := make([]string, 0, len(m.status.Pending)+len(m.status.Log))
-	for _, p := range m.status.Pending {
-		lines = append(lines, "⏳ "+p)
-	}
-	entries := m.status.Log
-	if n := rows - len(lines); n < len(entries) {
-		entries = entries[max(len(entries)-n, 0):]
-	}
-	for _, e := range entries {
-		lines = append(lines, e.Time.Format("15:04")+" "+e.Text)
-	}
-	if len(lines) > rows {
-		lines = lines[len(lines)-rows:]
-	}
-	for _, line := range lines {
-		s.row().plain(line)
-	}
-	for i := len(lines); i < rows; i++ {
-		s.row()
-	}
-}
-
-// footer is the notice line, when there is a notice, and the button line.
-func (m *Model) footer() []*row {
-	var rows []*row
-	if m.message != "" {
-		rows = append(rows, (&row{}).add(m.message, busyStyle))
-	}
-	r := &row{}
-	if m.closing {
-		if m.force {
-			r.plain("未コミットの変更がある worktree は残して閉じます ")
-			r.button("それでも閉じる", dangerButtonStyle, m.closeWorkspace)
-		} else {
-			r.plain("全AIを止めて worktree を片付けます（ブランチは残ります） ")
-			r.button("閉じる", dangerButtonStyle, m.closeWorkspace)
-		}
-		r.button("やめる", buttonStyle, func() tea.Cmd { m.closing, m.force = false, false; return nil })
-	} else {
-		r.button("デタッチ", buttonStyle, m.detach)
-		r.button("ワークスペースを閉じる", dangerButtonStyle, func() tea.Cmd { m.closing = true; return nil })
-		r.add("i:入力 a:自動Relay u:使用量 l:ログ d:デタッチ", dimStyle)
-	}
-	return append(rows, r)
 }
 
 func shellQuote(s string) string {

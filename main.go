@@ -128,6 +128,36 @@ var (
 		},
 	}
 
+	transcriptCmd = &cobra.Command{
+		Use:   "transcript <agent>",
+		Short: "Print the conversation of an agent in the open workspace (claude, codex or gemini)",
+		Long: "Prints the latest conversation of an agent in the open workspace, read from its CLI's own session log.\n" +
+			"Agents are told about this command at launch, so they can read each other's conversations.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			log.Initialize("[transcript] ")
+			defer log.Close()
+			ws, err := workspace.Load(config.LoadState())
+			if err != nil {
+				return err
+			}
+			if ws == nil {
+				return errors.New("開いているワークスペースがありません")
+			}
+			agent := relay.AgentByName(args[0])
+			m, ok := ws.Member(agent.Name())
+			if agent == relay.AgentUnknown || !ok {
+				return fmt.Errorf("%q はこのワークスペースのAIではありません（claude / codex / gemini）", args[0])
+			}
+			transcript, err := agent.Transcript(m.Dir)
+			if err != nil {
+				return fmt.Errorf("%s の会話記録を読めませんでした: %w", agent.Label(), err)
+			}
+			fmt.Print(transcript)
+			return nil
+		},
+	}
+
 	versionCmd = &cobra.Command{
 		Use:   "version",
 		Short: "Print the version number",
@@ -137,18 +167,21 @@ var (
 	}
 )
 
-// run attaches to the running dashboard, or chooses a workspace and starts one.
+// run asks where to work, every time: back to the running dashboard, or a
+// new workspace, which replaces the running one.
 func run(args []string) error {
 	tmux := dashboard.New(cmd2.MakeExecutor())
-	if tmux.Running() {
-		if len(args) > 0 {
-			fmt.Println("開いているワークスペースに戻ります。別の場所で始めるには、パネルでワークスペースを閉じてください。")
-		}
-		return tmux.Attach()
-	}
-
 	cfg := config.LoadConfig()
 	state := config.LoadState()
+
+	running := ""
+	if tmux.Running() {
+		running = "?"
+		if ws, err := workspace.Load(state); err == nil && ws != nil {
+			running = ws.Dir
+		}
+	}
+
 	var choice launcher.Choice
 	if len(args) == 1 {
 		_, root, err := workspace.Inspect(config.ExpandHome(args[0]))
@@ -158,16 +191,50 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		choice = launcher.Choice{Dir: root}
+		choice = launcher.Choice{Dir: root, Attach: root == running}
 	} else {
 		var err error
-		if choice, err = launcher.Run(cfg, state); errors.Is(err, launcher.ErrCancelled) {
+		if choice, err = launcher.Run(cfg, state, running); errors.Is(err, launcher.ErrCancelled) {
 			return nil
 		} else if err != nil {
 			return err
 		}
 	}
 
+	configDir, err := config.GetConfigDir()
+	if err != nil {
+		return err
+	}
+	// A request left by a dashboard that was not attached through here is stale.
+	workspace.TakeSwitch(configDir)
+
+	if !choice.Attach {
+		if running != "" {
+			// The worktrees stay, so the stopped workspace can be opened again.
+			if err := tmux.Kill(); err != nil {
+				return err
+			}
+		}
+		if err := start(tmux, cfg, state, configDir, choice); err != nil {
+			return err
+		}
+	}
+	// The panel's folder button stops the dashboard after leaving a switch
+	// request; reopen it on the chosen folder and attach again.
+	for {
+		attachErr := tmux.Attach()
+		dir, ok := workspace.TakeSwitch(configDir)
+		if !ok {
+			return attachErr
+		}
+		if err := start(tmux, cfg, state, configDir, launcher.Choice{Dir: dir}); err != nil {
+			return err
+		}
+	}
+}
+
+// start opens a workspace on the chosen directory and starts its dashboard.
+func start(tmux *dashboard.Tmux, cfg *config.Config, state *config.State, configDir string, choice launcher.Choice) error {
 	ws, err := workspace.Open(choice.Dir, choice.Scratch, cfg)
 	if err != nil {
 		return err
@@ -179,22 +246,19 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	configDir, err := config.GetConfigDir()
-	if err != nil {
-		return err
+	if err := workspace.WriteBriefings(ws, self); err != nil {
+		// Only agy goes without its briefing; the dashboard still starts.
+		log.ErrorLog.Printf("write briefings: %v", err)
 	}
 	width, height, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil {
 		width, height = 200, 50
 	}
-	if err := tmux.Create(dashboard.Layout(ws, self, configDir), width, height-1, self); err != nil {
-		return err
-	}
-	return tmux.Attach()
+	return tmux.Create(dashboard.Layout(ws, self, configDir), width, height-1, self)
 }
 
 func init() {
-	rootCmd.AddCommand(panelCmd, hookCmd, statusLineCmd, resetCmd, debugCmd, versionCmd)
+	rootCmd.AddCommand(panelCmd, hookCmd, statusLineCmd, resetCmd, debugCmd, transcriptCmd, versionCmd)
 }
 
 func main() {

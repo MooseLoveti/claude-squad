@@ -30,8 +30,29 @@ type Member struct {
 	Dir   string
 }
 
+// EventKind tells what a relay log entry records.
+type EventKind int
+
+const (
+	EventInfo EventKind = iota
+	EventWarn
+	// EventAsk: Agent asked Count agents a question.
+	EventAsk
+	// EventAnswer: Agent answered a question.
+	EventAnswer
+	// EventDeliver: Count answers went back to Agent.
+	EventDeliver
+	// EventBroadcast: a prompt was typed into Count agents.
+	EventBroadcast
+)
+
 // LogEntry is one line of the relay log; Detail holds the full text sent.
+// Seq numbers entries from 1, so readers can tell which ones are new.
 type LogEntry struct {
+	Seq    int
+	Kind   EventKind
+	Agent  relay.Agent
+	Count  int
 	Time   time.Time
 	Text   string
 	Detail string
@@ -48,6 +69,8 @@ const (
 	logLimit = 200
 	// noteQuestionLimit keeps a question short enough for a pane title.
 	noteQuestionLimit = 24
+	// noticeRetry waits for a CLI to take a dismissal before sending another.
+	noticeRetry = 5 * time.Second
 )
 
 type consultState int
@@ -113,12 +136,15 @@ type Relay struct {
 	history   map[relay.Agent]string
 	notes     map[relay.Agent]string
 	log       []LogEntry
+	seq       int
 	autoRelay bool
 	autoCount int
 	// autoSeen is each agent's latest reply already checked for tags.
 	autoSeen map[relay.Agent][sha256.Size]byte
 	// autoCandidate is a reply seen once, checked when it is seen again.
 	autoCandidate map[relay.Agent][sha256.Size]byte
+	// dismissedAt is when each agent's startup notice was last dismissed.
+	dismissedAt map[relay.Agent]time.Time
 }
 
 // NewRelay sets up a relay over members. Transcripts and the full relay log
@@ -137,6 +163,7 @@ func NewRelay(term Terminal, members []Member, configDir string) *Relay {
 		notes:         map[relay.Agent]string{},
 		autoSeen:      map[relay.Agent][sha256.Size]byte{},
 		autoCandidate: map[relay.Agent][sha256.Size]byte{},
+		dismissedAt:   map[relay.Agent]time.Time{},
 	}
 }
 
@@ -178,12 +205,12 @@ func (r *Relay) HandleEnter(pane string) bool {
 		return false
 	}
 	if to.Message == "" {
-		r.addLog("@タグの後に質問がありません", "")
+		r.warn("@タグの後に質問がありません")
 		return true
 	}
 	destinations, err := r.destinations(source, to)
 	if err != nil {
-		r.addLog(err.Error(), "")
+		r.warn(err.Error())
 		return true
 	}
 	// Two extra deletions cover characters InputText trims, such as a
@@ -255,7 +282,8 @@ func (r *Relay) startAsk(source Member, destinations []Member, question string, 
 		fmt.Fprintf(&detail, "=== %s へ ===\n%s\n\n", d.Agent.Label(), prompt)
 	}
 	r.asks = append(r.asks, a)
-	r.addLog(fmt.Sprintf("%s → %s: %s", source.Agent.Label(), strings.Join(labels, "・"), oneLine(question)), detail.String())
+	r.addLog(LogEntry{Kind: EventAsk, Agent: source.Agent, Count: len(destinations),
+		Text: fmt.Sprintf("%s → %s: %s", source.Agent.Label(), strings.Join(labels, "・"), oneLine(question)), Detail: detail.String()})
 }
 
 // sender describes the asker for the recipients, writing its transcript
@@ -284,10 +312,10 @@ func (r *Relay) Broadcast(text string) {
 	}
 	for _, m := range r.members {
 		if err := r.submit(m, text); err != nil {
-			r.addLog(fmt.Sprintf("%s に送れませんでした: %v", m.Agent.Label(), err), "")
+			r.warn(fmt.Sprintf("%s に送れませんでした: %v", m.Agent.Label(), err))
 		}
 	}
-	r.addLog("全員に送信: "+oneLine(text), text)
+	r.addLog(LogEntry{Kind: EventBroadcast, Count: len(r.members), Text: "全員に送信: " + oneLine(text), Detail: text})
 }
 
 // submit pastes text into a pane and presses Enter.
@@ -313,6 +341,7 @@ func (r *Relay) Step() {
 		}
 		r.history[m.Agent] = history
 		r.busy[m.Agent] = m.Agent.Busy(m.Dir, history)
+		r.dismissNotice(m)
 	}
 
 	for _, a := range r.asks {
@@ -343,6 +372,20 @@ func (r *Relay) Step() {
 	r.refreshNotes()
 }
 
+// dismissNotice closes a startup notice showing on m's pane. The keys may
+// interrupt work, so a busy agent is left alone.
+func (r *Relay) dismissNotice(m Member) {
+	keys := m.Agent.NoticeKeys(r.history[m.Agent])
+	if keys == nil || r.busy[m.Agent] || r.now().Sub(r.dismissedAt[m.Agent]) < noticeRetry {
+		return
+	}
+	if err := r.term.SendKeys(m.Pane, keys...); err != nil {
+		log.ErrorLog.Printf("dismiss notice on %s: %v", m.Agent.Label(), err)
+		return
+	}
+	r.dismissedAt[m.Agent] = r.now()
+}
+
 // free reports whether an agent can take a message now: it is not working and
 // no question sent to it is still waiting for its answer.
 func (r *Relay) free(agent relay.Agent) bool {
@@ -366,7 +409,7 @@ func (r *Relay) send(c *consult) {
 	}
 	if err := r.submit(c.to, c.prompt); err != nil {
 		c.state, c.answer = consultAnswered, fmt.Sprintf("（回答なし: 送信に失敗しました: %v）", err)
-		r.addLog(fmt.Sprintf("%s に送れませんでした: %v", c.to.Agent.Label(), err), "")
+		r.warn(fmt.Sprintf("%s に送れませんでした: %v", c.to.Agent.Label(), err))
 		return
 	}
 	c.state, c.sentAt = consultSent, r.now()
@@ -377,7 +420,7 @@ func (r *Relay) send(c *consult) {
 func (r *Relay) collect(c *consult) {
 	if r.now().Sub(c.sentAt) > consultTimeout {
 		c.state, c.answer = consultAnswered, "（回答なし: 時間内に返答がありませんでした）"
-		r.addLog(c.to.Agent.Label()+" から返答がありませんでした", "")
+		r.warn(c.to.Agent.Label() + " から返答がありませんでした")
 		return
 	}
 	if r.busy[c.to.Agent] {
@@ -394,7 +437,7 @@ func (r *Relay) collect(c *consult) {
 	c.state, c.answer = consultAnswered, reply
 	// The answer is not a new message to scan for tags.
 	r.autoSeen[c.to.Agent] = id
-	r.addLog(c.to.Agent.Label()+" が回答しました", reply)
+	r.addLog(LogEntry{Kind: EventAnswer, Agent: c.to.Agent, Text: c.to.Agent.Label() + " が回答しました", Detail: reply})
 }
 
 // deliver types the combined answers into the asker's session and reports
@@ -407,13 +450,13 @@ func (r *Relay) deliver(a *ask) bool {
 	message := relay.FormatAnswers(a.question, a.fromUser, answers)
 	if err := r.submit(a.asker, message); err != nil {
 		if !a.deliveryFailed {
-			r.addLog(fmt.Sprintf("%s に回答を返せませんでした（再試行します）: %v", a.asker.Agent.Label(), err), message)
+			r.addLog(LogEntry{Kind: EventWarn, Text: fmt.Sprintf("%s に回答を返せませんでした（再試行します）: %v", a.asker.Agent.Label(), err), Detail: message})
 		}
 		a.deliveryFailed = true
 		return false
 	}
 	r.busy[a.asker.Agent] = true
-	r.addLog(a.asker.Agent.Label()+" に回答を返しました", message)
+	r.addLog(LogEntry{Kind: EventDeliver, Agent: a.asker.Agent, Count: len(a.consults), Text: a.asker.Agent.Label() + " に回答を返しました", Detail: message})
 	return true
 }
 
@@ -448,14 +491,14 @@ func (r *Relay) checkTaggedReplies() {
 		}
 		destinations, err := r.destinations(m, to)
 		if err != nil {
-			r.addLog(err.Error(), "")
+			r.warn(err.Error())
 			continue
 		}
 		r.startAsk(m, destinations, to.Message, false)
 		r.autoCount++
 		if r.autoCount >= autoRelayLimit {
 			r.autoRelay = false
-			r.addLog(fmt.Sprintf("自動Relayを%d回で止めました", autoRelayLimit), "")
+			r.addLog(LogEntry{Kind: EventInfo, Text: fmt.Sprintf("自動Relayを%d回で止めました", autoRelayLimit)})
 			return
 		}
 	}
@@ -519,8 +562,13 @@ func oneLine(text string) string {
 	return strings.Join(strings.Fields(text), " ")
 }
 
-func (r *Relay) addLog(text, detail string) {
-	entry := LogEntry{Time: r.now(), Text: text, Detail: detail}
+func (r *Relay) warn(text string) {
+	r.addLog(LogEntry{Kind: EventWarn, Text: text})
+}
+
+func (r *Relay) addLog(entry LogEntry) {
+	r.seq++
+	entry.Seq, entry.Time = r.seq, r.now()
 	r.log = append(r.log, entry)
 	if len(r.log) > logLimit {
 		r.log = r.log[len(r.log)-logLimit:]

@@ -7,17 +7,22 @@ import (
 )
 
 // PanelTitle is the control panel pane's title.
-const PanelTitle = "操作パネル"
+const PanelTitle = "🎮 操作パネル"
 
-// AgentCommand is the shell command that runs a member's agent. A member
-// without a configured or installed program shows how to fix that instead.
-func AgentCommand(m workspace.Member, env relay.LaunchEnv) string {
+// panelColor is the control panel's theme color.
+const panelColor = accentColor
+
+// AgentCommand is the shell command that runs a member of w, briefed on the
+// other members. A member without a configured or installed program shows how
+// to fix that instead.
+func AgentCommand(w *workspace.Workspace, m workspace.Member, env relay.LaunchEnv) string {
 	agent := relay.AgentByName(m.Agent)
 	if m.Program == "" {
 		message := fmt.Sprintf("%s (%s) が見つかりません。PATH に入れるか、~/.claude-squad/config.json の profiles に登録してください。",
 			agent.Label(), agent.Executable())
 		return "printf '%s\\n' " + shellQuote(message)
 	}
+	env.Briefing = workspace.Briefing(w, m, env.Self)
 	return ShellCommand(m.Program, agent.LaunchArgs(env))
 }
 
@@ -29,16 +34,16 @@ func Layout(w *workspace.Workspace, self, sharedDir string) []Pane {
 	var panes []Pane
 	for _, m := range w.Members {
 		agent := relay.AgentByName(m.Agent)
-		title := agent.Label()
+		title := agent.Emoji() + " " + agent.Label()
 		if m.Branch != "" {
-			title += " [" + m.Branch + "]"
+			title += " ⎇ " + m.Branch
 		}
-		panes = append(panes, Pane{Slot: agent.Slot(), Agent: m.Agent, Title: title, Dir: m.Dir, Command: AgentCommand(m, env)})
+		panes = append(panes, Pane{Slot: agent.Slot(), Agent: m.Agent, Title: title, Color: agent.Color(), Dir: m.Dir, Command: AgentCommand(w, m, env)})
 		used[agent.Slot()] = true
 	}
 	for slot := relay.SlotTopLeft; slot <= relay.SlotBottomRight; slot++ {
 		if !used[slot] {
-			panes = append(panes, Pane{Slot: slot, Title: PanelTitle, Dir: w.Dir, Command: shellQuote(self) + " panel"})
+			panes = append(panes, Pane{Slot: slot, Title: PanelTitle, Color: panelColor, Dir: w.Dir, Command: shellQuote(self) + " panel"})
 			break
 		}
 	}

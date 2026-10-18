@@ -11,20 +11,63 @@ import (
 	xansi "github.com/charmbracelet/x/ansi"
 )
 
-var (
-	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#5A3FC0", Dark: "#B69CFF"})
-	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#1F6FB2", Dark: "#7CC4FF"})
-	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#777777", Dark: "#8A8A8A"})
-	buttonStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#FFFFFF", Dark: "#1A1A1A"}).
-			Background(lipgloss.AdaptiveColor{Light: "#3F6FB0", Dark: "#9CC9F5"})
-	activeButtonStyle = buttonStyle.Background(lipgloss.AdaptiveColor{Light: "#2E8B57", Dark: "#7FD99B"})
-	dangerButtonStyle = buttonStyle.Background(lipgloss.AdaptiveColor{Light: "#B03A3A", Dark: "#F28B82"})
-	busyStyle         = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#B8860B", Dark: "#FFD166"})
-	idleStyle         = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#2E8B57", Dark: "#7FD99B"})
-	errorStyle        = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#B03A3A", Dark: "#F28B82"})
-	addedStyle        = idleStyle
-	removedStyle      = errorStyle
+// Palette: neon on a dark background, the same as the tmux chrome.
+const (
+	accent = "#FF5FD7"
+	gold   = "#FFD75F"
+	mint   = "#5FFF87"
+	cyan   = "#00D7FF"
+	violet = "#AF87FF"
+	hot    = "#FF5F5F"
+	ink    = "#1A1033"
+	muted  = "#8A86A8"
 )
+
+// rainbow is cycled across letters, shifted every animation frame.
+var rainbow = []string{"#FF5F87", "#FF8700", "#FFD700", "#5FFF87", "#00D7FF", "#AF87FF"}
+
+// spinner is a busy agent's animation.
+var spinner = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// confetti decorates celebrations.
+var confetti = []rune("✦✧★☆✸✺❋✹")
+
+func fg(color string) lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(color))
+}
+
+var (
+	dimStyle    = fg(muted)
+	errorStyle  = fg(hot).Bold(true)
+	noticeStyle = fg(gold).Bold(true)
+)
+
+func button(color string) lipgloss.Style {
+	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ink)).Background(lipgloss.Color(color))
+}
+
+// rainbowText colors each rune of text, shifted by frame so it flows.
+func rainbowText(text string, frame int, bold bool) string {
+	var b strings.Builder
+	for i, r := range []rune(text) {
+		style := fg(rainbow[(i+frame)%len(rainbow)])
+		if bold {
+			style = style.Bold(true)
+		}
+		b.WriteString(style.Render(string(r)))
+	}
+	return b.String()
+}
+
+// confettiText is a strip of colored confetti that moves with frame.
+func confettiText(n, frame int) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		r := confetti[(i*3+frame)%len(confetti)]
+		b.WriteString(fg(rainbow[(i+frame)%len(rainbow)]).Render(string(r)))
+	}
+	return b.String()
+}
 
 // zone is a clickable span of one rendered row.
 type zone struct {
@@ -49,12 +92,25 @@ func (r *row) plain(text string) *row {
 	return r.add(text, lipgloss.NewStyle())
 }
 
+// raw appends text that is already styled.
+func (r *row) raw(styled string) *row {
+	r.b.WriteString(styled)
+	r.width += lipgloss.Width(styled)
+	return r
+}
+
 // button adds a clickable label.
 func (r *row) button(label string, style lipgloss.Style, action func() tea.Cmd) *row {
 	text := " " + label + " "
 	r.zones = append(r.zones, zone{x0: r.width, x1: r.width + lipgloss.Width(text), action: action})
 	r.add(text, style)
 	return r.plain(" ")
+}
+
+// clickable makes the whole row run action when clicked.
+func (r *row) clickable(width int, action func() tea.Cmd) *row {
+	r.zones = append(r.zones, zone{x0: 0, x1: width, action: action})
+	return r
 }
 
 // screen collects rows and their clickable zones.
@@ -66,20 +122,6 @@ type screen struct {
 func (s *screen) row() *row {
 	r := &row{}
 	s.rows = append(s.rows, r)
-	return r
-}
-
-// header starts a section with its title and any buttons, filled out to the
-// panel's width with a rule.
-func (s *screen) header(title string, buttons ...func(*row)) *row {
-	r := s.row()
-	r.add("━ "+title+" ", headerStyle)
-	for _, b := range buttons {
-		b(r)
-	}
-	if rest := s.width - r.width; rest > 0 {
-		r.add(strings.Repeat("━", rest), dimStyle)
-	}
 	return r
 }
 
@@ -105,17 +147,22 @@ func (s *screen) render(height int) (string, []zone) {
 	return strings.Join(lines, "\n"), zones
 }
 
-// meter draws how much of a window is left.
-func meter(remaining float64, cells int) string {
-	filled := int(math.Round(remaining * float64(cells)))
-	style := idleStyle
+// hpColor goes green, yellow, red as a window runs out.
+func hpColor(remaining float64) string {
 	switch {
 	case remaining < 0.2:
-		style = errorStyle
+		return hot
 	case remaining < 0.5:
-		style = busyStyle
+		return gold
+	default:
+		return mint
 	}
-	return style.Render(strings.Repeat("█", filled)) + dimStyle.Render(strings.Repeat("░", cells-filled))
+}
+
+// hpBar draws how much of a window is left, like a health bar.
+func hpBar(remaining float64, cells int) string {
+	filled := int(math.Round(remaining * float64(cells)))
+	return fg(hpColor(remaining)).Render(strings.Repeat("▰", filled)) + fg("#3A3A5A").Render(strings.Repeat("▱", cells-filled))
 }
 
 // countdown is the time until t, such as "2h10m" or "3d4h".

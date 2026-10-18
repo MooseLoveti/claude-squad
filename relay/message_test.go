@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -70,10 +71,34 @@ func TestLaunchArgs(t *testing.T) {
 
 	require.Equal(t, []string{"--add-dir", "/cfg"}, AgentClaude.LaunchArgs(LaunchEnv{SharedDir: "/cfg"}),
 		"no status line without a claude-squad executable to call")
-	require.Nil(t, AgentCodex.LaunchArgs(env))
+	require.Nil(t, AgentCodex.LaunchArgs(env), "nothing to pass without a briefing")
 	require.Nil(t, AgentAntigravity.LaunchArgs(env), "--add-dir would move agy's command cwd")
 	require.Nil(t, AgentUnknown.LaunchArgs(env))
+
+	env.Briefing = "line \"one\"\nline two"
+	require.Equal(t, []string{"--add-dir", "/cfg", "--append-system-prompt", env.Briefing, "--settings"}, AgentClaude.LaunchArgs(env)[:5])
+	codex := AgentCodex.LaunchArgs(env)
+	require.Len(t, codex, 2)
+	require.Equal(t, "-c", codex[0])
+	value, ok := strings.CutPrefix(codex[1], "developer_instructions=")
+	require.True(t, ok, codex[1])
+	var decoded string
+	require.NoError(t, json.Unmarshal([]byte(value), &decoded), "the value is one quoted string, as TOML reads it")
+	require.Equal(t, env.Briefing, decoded)
+	require.Nil(t, AgentAntigravity.LaunchArgs(env), "agy reads its briefing from GEMINI.md")
 }
+
+func TestNoticeKeys(t *testing.T) {
+	// As Codex 0.160 draws it in a 115-column pane.
+	notice := "  Welcome.\n\n\n  Set up security for Daybreak mode\n  Set up Advanced Account Security with a hardware security key. You can keep using Codex while you finish\n  setup.\n\n› 1. Set up security\n\n  Press a number to choose · esc to dismiss · type to continue\n\n\n› Ask Codex to do anything\n\n  GPT-6.1-Sol default · ~/wt/codex\n  ? for shortcuts      ⚠ 2 warnings · f2 to view\n\n\n"
+	require.Equal(t, []string{"Escape"}, AgentCodex.NoticeKeys(notice))
+	require.Nil(t, AgentCodex.NoticeKeys(codexIdle), "no notice, nothing to dismiss")
+	require.Nil(t, AgentCodex.NoticeKeys("Set up security for Daybreak mode\n"+strings.Repeat("• reply line\n", noticeTailLines)),
+		"a notice scrolled far up is no longer showing")
+	require.Nil(t, AgentClaude.NoticeKeys(notice), "only Codex shows this notice")
+}
+
+const codexIdle = "• done\n\n› Ask Codex to do anything\n"
 
 func TestAgentNamesAndSlots(t *testing.T) {
 	slots := map[Slot]bool{}
@@ -87,6 +112,10 @@ func TestAgentNamesAndSlots(t *testing.T) {
 	require.Equal(t, SlotBottomLeft, AgentClaude.Slot())
 	require.Equal(t, SlotBottomRight, AgentAntigravity.Slot())
 	require.Equal(t, AgentUnknown, AgentByName("aider"))
+	for _, agent := range Agents() {
+		require.NotEmpty(t, agent.Emoji(), agent.Label())
+		require.Regexp(t, `^#[0-9A-F]{6}$`, agent.Color(), agent.Label())
+	}
 }
 
 func TestBusyReadsPaneOrLog(t *testing.T) {

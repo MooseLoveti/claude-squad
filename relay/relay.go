@@ -40,6 +40,8 @@ type LaunchEnv struct {
 	SharedDir string
 	// Self is the claude-squad executable, for CLIs that call back into it.
 	Self string
+	// Briefing is told to the agent before its first prompt; see Briefing.
+	Briefing string
 }
 
 // agentSpec holds everything that differs between relay agents. Supporting a
@@ -48,6 +50,9 @@ type agentSpec struct {
 	// executable is matched against the configured program.
 	executable string
 	label      string
+	// emoji and color (hex) mark the agent in the dashboard.
+	emoji string
+	color string
 	// slot is where the agent's pane sits in the dashboard.
 	slot Slot
 	// tags address the agent in a reply; the first one is canonical.
@@ -75,13 +80,23 @@ type agentSpec struct {
 	// still being worked on.
 	logBusy func(cwd string) bool
 	// launchArgs grant access to the shared directory, so reading a peer never
-	// stops on a permission prompt, and wire up usage reporting.
+	// stops on a permission prompt, pass the briefing, and wire up usage
+	// reporting.
 	launchArgs func(env LaunchEnv) []string
-	findLog    func(cwd string) (string, error)
-	parseLog   func(io.Reader) ([]turn, error)
+	// startupNotices are notices the CLI may show at launch that need no
+	// answer; the dashboard dismisses them.
+	startupNotices []startupNotice
+	findLog        func(cwd string) (string, error)
+	parseLog       func(io.Reader) ([]turn, error)
 	// usage reads the account's remaining rate limits, worth doing every usagePoll.
 	usage     func(ctx context.Context, env UsageEnv) (Usage, error)
 	usagePoll time.Duration
+}
+
+// startupNotice is a notice a CLI shows at launch and the keys that dismiss it.
+type startupNotice struct {
+	marker string
+	keys   []string
 }
 
 // relayAgents fixes the iteration order so routing and detection are deterministic.
@@ -91,6 +106,8 @@ var specs = map[Agent]agentSpec{
 	AgentClaude: {
 		executable:       "claude",
 		label:            "Claude Code",
+		emoji:            "🧠",
+		color:            "#E8885F",
 		slot:             SlotBottomLeft,
 		tags:             []string{"@claude"},
 		responseMarkers:  []string{"⏺", "●"},
@@ -106,6 +123,8 @@ var specs = map[Agent]agentSpec{
 	AgentCodex: {
 		executable:       "codex",
 		label:            "Codex",
+		emoji:            "🤖",
+		color:            "#19C37D",
 		slot:             SlotTopLeft,
 		tags:             []string{"@codex"},
 		responseMarkers:  []string{"•"},
@@ -115,15 +134,20 @@ var specs = map[Agent]agentSpec{
 		busyMarkers: []string{"esc to interrupt"},
 		replyFooter: regexp.MustCompile(`^\s*(Worked for \d|└ Tip: )`),
 		// Codex's read-only sandbox can already read the whole filesystem.
-		launchArgs: func(LaunchEnv) []string { return nil },
-		findLog:    findCodexLog,
-		parseLog:   parseCodexLog,
-		usage:      codexUsage,
-		usagePoll:  localUsagePoll,
+		launchArgs: codexLaunchArgs,
+		// Accounts with Daybreak models get a hardware security key reminder
+		// on every launch, which config cannot turn off.
+		startupNotices: []startupNotice{{marker: "Set up security for Daybreak mode", keys: []string{"Escape"}}},
+		findLog:        findCodexLog,
+		parseLog:       parseCodexLog,
+		usage:          codexUsage,
+		usagePoll:      localUsagePoll,
 	},
 	AgentAntigravity: {
 		executable:  "agy",
 		label:       "Gemini",
+		emoji:       "✨",
+		color:       "#5B9BFF",
 		slot:        SlotBottomRight,
 		tags:        []string{"@gemini", "@agy"},
 		inputPrefix: ">",
@@ -132,7 +156,9 @@ var specs = map[Agent]agentSpec{
 		latestReply: agyLatestReply,
 		logBusy:     agyBusy,
 		// --add-dir makes agy run commands in the added directory instead of
-		// its own worktree; reads outside the workspace ask once instead.
+		// its own worktree; reads outside the workspace ask once instead. agy
+		// takes no instructions on its command line, so its briefing is a
+		// GEMINI.md written into its worktree.
 		launchArgs: func(LaunchEnv) []string { return nil },
 		findLog:    findAgyLog,
 		parseLog:   parseAgyLog,
@@ -195,6 +221,16 @@ func (a Agent) Executable() string {
 	return specs[a].executable
 }
 
+// Emoji marks the agent in the dashboard.
+func (a Agent) Emoji() string {
+	return specs[a].emoji
+}
+
+// Color is the agent's theme color as "#RRGGBB".
+func (a Agent) Color() string {
+	return specs[a].color
+}
+
 // Slot is where the agent's pane sits in the dashboard.
 func (a Agent) Slot() Slot {
 	return specs[a].slot
@@ -219,6 +255,21 @@ func (a Agent) Busy(cwd, pane string) bool {
 		return spec.logBusy(cwd)
 	}
 	return isBusy(spec, pane)
+}
+
+// noticeTailLines reaches a notice's first line above the option list, hints,
+// input box and status lines drawn under it.
+const noticeTailLines = 20
+
+// NoticeKeys returns the keys that dismiss a startup notice showing at the
+// bottom of the pane, or nil when none is showing.
+func (a Agent) NoticeKeys(pane string) []string {
+	for _, n := range specs[a].startupNotices {
+		if paneTailContains(pane, noticeTailLines, []string{n.marker}) {
+			return n.keys
+		}
+	}
+	return nil
 }
 
 // allTag addresses every other running agent at once.

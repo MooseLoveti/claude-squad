@@ -47,7 +47,6 @@ curl -fsSL https://raw.githubusercontent.com/smtg-ai/claude-squad/main/install.s
 ### Prerequisites
 
 - [tmux](https://github.com/tmux/tmux/wiki/Installing)
-- [gh](https://cli.github.com/)
 
 ### Usage
 
@@ -59,12 +58,13 @@ Usage:
 Available Commands:
   debug       Print debug information like config paths
   reset       Stop the dashboard and forget the open workspace (worktrees and branches are kept)
+  transcript  Print the conversation of an agent in the open workspace (claude, codex or gemini)
   version     Print the version number
 ```
 
 Run `cs`. A launcher asks where to work:
 
-- **Open an existing directory.** In a git repository every agent gets its own worktree and branch (`<branch_prefix><agent>`); opening the same repository again reuses them. A repository without commits gets an empty first commit if you agree. A plain directory can be made a repository or shared by all agents as is.
+- **Open an existing directory.** In a git repository every agent gets its own worktree and branch (`<branch_prefix><agent>`); opening the same repository again reuses them. A repository without commits gets an empty first commit if you agree. A plain directory can be made a repository, whose first commit holds the files already there (refused for the home directory and above), or shared by all agents as is.
 - **Create a new directory** as a git repository with an empty first commit.
 - **Work without a directory**: a throwaway directory under `~/.claude-squad/scratch/` shared by all agents.
 - Recently used directories and the repositories under `projects_dir` (default `~/src`) are listed too.
@@ -85,7 +85,8 @@ Click a pane, or move with Shift+arrow keys, to type into it; each agent runs as
 The control panel shows:
 
 - **Remaining usage** of each account: Codex's 5-hour and weekly windows from its session logs, Claude Code's from the status line it reports to `cs statusline` (installed per session with `--settings`), and agy's from `agy -p /usage` every 5 minutes. None of these runs a model turn.
-- **Agents**: working or idle, lines changed on the branch, and buttons to view the diff, merge the branch into the repository's current branch (conflicts are left for you or an agent to resolve), push it, or restart the agent.
+- **Agents**: working, idle or stopped, with a button to restart each one.
+- **Open a work folder** with the Windows folder dialog (under WSL); the dashboard reopens there.
 - **Broadcast**: a box that types the same prompt into every agent.
 - **Relay** log, auto relay toggle, and the full log (`~/.claude-squad/relay/log.txt`).
 - **Close workspace** stops every agent and removes the worktrees, keeping their branches. Worktrees with uncommitted changes are kept.
@@ -117,6 +118,8 @@ Claude Squad stores its configuration in `~/.claude-squad/config.json`. You can 
 An agent without a profile runs its executable from `PATH` (`claude`, `codex`, `agy`).
 
 ### Asking other agents (Relay)
+
+Every agent is told at launch which other agents work alongside it, where their worktrees are, and that `cs transcript <agent>` prints their latest conversation, so a plain "what did Codex change?" works without tags. Claude Code gets this through `--append-system-prompt`, Codex through `-c developer_instructions=…`, and agy through a `GEMINI.md` written into its worktree and kept out of git with `info/exclude` (skipped in a shared directory, or when the repository has its own `GEMINI.md`).
 
 Start a prompt in an agent's pane with tags to ask the others instead:
 

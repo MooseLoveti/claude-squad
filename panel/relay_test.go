@@ -415,3 +415,30 @@ func TestHookRoundTrip(t *testing.T) {
 	require.False(t, AskHook(path, claudePane))
 	require.NoFileExists(t, path)
 }
+
+func TestStartupNoticeIsDismissedOnce(t *testing.T) {
+	f := newRelayFixture(t, claudeMember, codexMember)
+	f.term.screens[claudePane] = claudeScreen("hi", "")
+	notice := "  Set up security for Daybreak mode\n› 1. Set up security\n  Press a number to choose · esc to dismiss\n\n› \n"
+	f.term.screens[codexPane] = notice
+
+	f.relay.Step()
+	require.Equal(t, []string{"Escape"}, f.term.keys[codexPane])
+	f.now = f.now.Add(time.Second)
+	f.relay.Step()
+	require.Equal(t, []string{"Escape"}, f.term.keys[codexPane], "Codex gets time to take the first one")
+	f.now = f.now.Add(noticeRetry)
+	f.relay.Step()
+	require.Equal(t, []string{"Escape", "Escape"}, f.term.keys[codexPane], "a notice still showing is dismissed again")
+
+	f.term.screens[codexPane] = codexScreen("hi")
+	f.now = f.now.Add(noticeRetry)
+	f.relay.Step()
+	require.Len(t, f.term.keys[codexPane], 2, "nothing is sent once it is gone")
+	require.Empty(t, f.term.keys[claudePane])
+
+	f.term.screens[codexPane] = notice + "• Working (3s • esc to interrupt)\n"
+	f.now = f.now.Add(noticeRetry)
+	f.relay.Step()
+	require.Len(t, f.term.keys[codexPane], 2, "Escape would interrupt a busy agent")
+}

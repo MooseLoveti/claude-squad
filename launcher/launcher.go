@@ -22,6 +22,8 @@ type Choice struct {
 	Dir string
 	// Scratch marks a throwaway directory made for working without one.
 	Scratch bool
+	// Attach returns to the dashboard that is already running.
+	Attach bool
 }
 
 // ErrCancelled means the user left the launcher without choosing.
@@ -30,7 +32,7 @@ var ErrCancelled = errors.New("cancelled")
 type itemKind int
 
 const (
-	itemResume itemKind = iota
+	itemAttach itemKind = iota
 	itemOpen
 	itemCreate
 	itemScratch
@@ -41,8 +43,6 @@ type item struct {
 	kind  itemKind
 	label string
 	dir   string
-	// scratch carries over a resumed workspace's scratch flag.
-	scratch bool
 }
 
 // confirmKind is a question the launcher is waiting on.
@@ -54,6 +54,8 @@ const (
 	confirmNoCommits
 	// confirmNotGit: a plain directory can become a repository or be shared.
 	confirmNotGit
+	// confirmSwitch: opening another workspace stops the running one.
+	confirmSwitch
 )
 
 type model struct {
@@ -64,7 +66,11 @@ type model struct {
 	err     string
 	confirm confirmKind
 	pending string
-	choice  *Choice
+	// switching is the choice waiting for confirmSwitch.
+	switching *Choice
+	choice    *Choice
+	// running is the directory of the dashboard already running, if any.
+	running string
 	width   int
 	// itemRows maps a rendered row to the item it shows, for mouse clicks.
 	itemRows map[int]int
@@ -72,9 +78,11 @@ type model struct {
 }
 
 // Run shows the launcher and returns the chosen directory, already a usable
-// workspace directory (initialized when the user agreed to).
-func Run(cfg *config.Config, state *config.State) (Choice, error) {
-	m := newModel(cfg, state)
+// workspace directory (initialized when the user agreed to). running is the
+// directory of the dashboard already running, empty when none is; it is
+// offered first, and choosing anything else is confirmed because it stops it.
+func Run(cfg *config.Config, state *config.State, running string) (Choice, error) {
+	m := newModel(cfg, state, running)
 	final, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	if err != nil {
 		return Choice{}, err
@@ -85,7 +93,7 @@ func Run(cfg *config.Config, state *config.State) (Choice, error) {
 	return Choice{}, ErrCancelled
 }
 
-func newModel(cfg *config.Config, state *config.State) *model {
+func newModel(cfg *config.Config, state *config.State, running string) *model {
 	cwd, _ := os.Getwd()
 	open := textinput.New()
 	open.Prompt = "パス: "
@@ -94,9 +102,9 @@ func newModel(cfg *config.Config, state *config.State) *model {
 	create.Prompt = "パス: "
 	create.SetValue(withSlash(cfg.Projects()))
 
-	m := &model{open: open, create: create, cfg: cfg}
-	if saved, err := workspace.Load(state); err == nil && saved != nil {
-		m.items = append(m.items, item{kind: itemResume, label: "前回のワークスペースを再開  " + pretty(saved.Dir), dir: saved.Dir, scratch: saved.Scratch})
+	m := &model{open: open, create: create, cfg: cfg, running: running}
+	if running != "" {
+		m.items = append(m.items, item{kind: itemAttach, label: "開いているワークスペースに戻る  " + pretty(running), dir: running})
 	}
 	m.items = append(m.items,
 		item{kind: itemOpen, label: "既存のディレクトリを開く"},
@@ -230,8 +238,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *model) activate() (tea.Model, tea.Cmd) {
 	it := m.items[m.cursor]
 	switch it.kind {
-	case itemResume:
-		return m.done(Choice{Dir: it.dir, Scratch: it.scratch})
+	case itemAttach:
+		m.choice = &Choice{Dir: it.dir, Attach: true}
+		return m, tea.Quit
 	case itemOpen:
 		return m.openDir(config.ExpandHome(strings.TrimSpace(m.open.Value())))
 	case itemDir:
@@ -280,6 +289,11 @@ func (m *model) answer(key string) (tea.Model, tea.Cmd) {
 	dir, kind := m.pending, m.confirm
 	m.confirm, m.pending = confirmNone, ""
 	switch {
+	case kind == confirmSwitch && key == "y":
+		m.choice = m.switching
+		return m, tea.Quit
+	case kind == confirmSwitch:
+		m.switching = nil
 	case kind == confirmNoCommits && key == "y":
 		if err := workspace.InitialCommit(dir); err != nil {
 			m.err = err.Error()
@@ -298,7 +312,13 @@ func (m *model) answer(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// done finishes with c, first confirming that the running dashboard may be
+// stopped for it.
 func (m *model) done(c Choice) (tea.Model, tea.Cmd) {
+	if m.running != "" {
+		m.confirm, m.switching = confirmSwitch, &c
+		return m, nil
+	}
 	m.choice = &c
 	return m, tea.Quit
 }
@@ -381,9 +401,13 @@ func (m *model) View() string {
 	switch m.confirm {
 	case confirmNoCommits:
 		add("  " + askStyle.Render(pretty(m.pending)+" にはコミットがありません。空の初期コミットを作りますか？ (y/n)"))
+	case confirmSwitch:
+		add("  " + askStyle.Render(pretty(m.running)+" で動いているAIを止めて、"+pretty(m.switching.Dir)+" に切り替えますか？ (y/n)"))
 	case confirmNotGit:
-		add("  " + askStyle.Render(pretty(m.pending)+" は git リポジトリではありません。"))
-		add("  " + askStyle.Render("g: git リポジトリにして各AIに worktree を作る / s: このまま3つのAIで共有する / ほかのキー: 戻る"))
+		add("  " + askStyle.Render(pretty(m.pending)+" は git で管理されていないフォルダです。どう開きますか？"))
+		add("  " + askStyle.Render("g: git 管理を始める（今あるファイルを最初のコミットにして、AIごとに別の作業コピーとブランチを作る）"))
+		add("  " + askStyle.Render("s: 3つのAIでこのフォルダを直接共有する（git は使わない。同じファイルを同時に触るので衝突に注意）"))
+		add("  " + askStyle.Render("ほかのキー: 戻る"))
 	}
 	if m.err != "" {
 		add("  " + errorStyle.Render(m.err))

@@ -52,6 +52,11 @@ func Run() error {
 		members = append(members, Member{Agent: agent, Pane: p.ID, Dir: wm.Dir})
 	}
 
+	// The dashboard may have been started by another version.
+	if err := tmux.Restyle(dashboard.Layout(ws, self, configDir), self); err != nil {
+		log.WarningLog.Printf("restyle dashboard: %v", err)
+	}
+
 	r := NewRelay(tmux, members, configDir)
 	stopHook, err := ServeHook(SocketPath(configDir), r.HandleEnter)
 	if err != nil {
@@ -75,7 +80,12 @@ func Run() error {
 	}()
 
 	env := relay.LaunchEnv{SharedDir: configDir, Self: self}
-	model := newModel(ws, state, tmux, r, members, env, configDir)
+	toast := func(text string) {
+		if err := tmux.Toast(text); err != nil {
+			log.WarningLog.Printf("toast: %v", err)
+		}
+	}
+	model := newModel(ws, state, tmux, r, members, env, configDir, toast)
 	_, err = tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	if err != nil {
 		log.ErrorLog.Printf("panel: %v", err)

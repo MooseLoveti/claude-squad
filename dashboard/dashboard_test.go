@@ -91,6 +91,7 @@ func TestCreateLaysOutPanesBySlot(t *testing.T) {
 	require.Contains(t, cmds, "set-option -p -t %4 @cs_agent gemini")
 	require.Contains(t, cmds, `bind-key -n Enter if-shell -F #{@cs_agent} run-shell "'/bin/cs' hook enter #{pane_id}" send-keys Enter`)
 	require.Contains(t, cmds, "set-option -g mouse on")
+	require.Contains(t, cmds, "set-option -g pane-border-lines heavy")
 	require.Contains(t, cmds, "bind-key -n S-Left select-pane -L")
 	require.Contains(t, cmds, "bind-key -n S-Down select-pane -D")
 	require.Equal(t, "select-pane -t %1", cmds[len(cmds)-1], "the first agent pane starts selected")
@@ -145,6 +146,28 @@ func TestCommandErrorsCarryTmuxOutput(t *testing.T) {
 	require.True(t, tmux.Running())
 }
 
+func TestRestyleUpdatesRunningPanes(t *testing.T) {
+	rec := &recorder{listOut: "%1\tcodex\t0\n%2\t\t0\n"}
+	tmux := &Tmux{exec: rec.exec(), socket: Socket}
+	require.NoError(t, tmux.Restyle(testPanes(), "/bin/cs"))
+	cmds := rec.commands()
+	require.Contains(t, cmds, "set-option -p -t %1 @cs_title Codex")
+	require.Contains(t, cmds, "set-option -p -t %2 @cs_title "+PanelTitle)
+	require.Contains(t, cmds, "set-option -g pane-border-lines heavy")
+	require.NotContains(t, strings.Join(cmds, "\n"), "Claude Code", "panes that are not running are skipped")
+
+	require.Error(t, (&Tmux{exec: (&recorder{failOn: "list-panes"}).exec()}).Restyle(nil, "cs"))
+}
+
+func TestToastAndStatusTitle(t *testing.T) {
+	rec := &recorder{}
+	tmux := &Tmux{exec: rec.exec(), socket: Socket}
+	require.NoError(t, tmux.Toast("🎉 #1 届いた"))
+	require.Equal(t, []string{"display-message -d 3000 🎉 ##1 届いた"}, rec.commands())
+	require.Contains(t, statusTitle(), "#[fg=#FF5F87] ")
+	require.Contains(t, statusTitle(), "S")
+}
+
 func TestShellCommandQuotesArguments(t *testing.T) {
 	require.Equal(t, `claude '--add-dir' '/cfg' '--settings' '{"a":"it'\''s"}'`,
 		ShellCommand("claude", []string{"--add-dir", "/cfg", "--settings", `{"a":"it's"}`}))
@@ -164,10 +187,17 @@ func TestLayoutPutsThePanelInTheFreeSlot(t *testing.T) {
 	}
 	require.Len(t, bySlot, 4)
 	require.Equal(t, "codex", bySlot[relay.SlotTopLeft].Agent)
-	require.Equal(t, "Codex [me/codex]", bySlot[relay.SlotTopLeft].Title)
-	require.Equal(t, "codex --search", bySlot[relay.SlotTopLeft].Command)
+	require.Equal(t, "🤖 Codex ⎇ me/codex", bySlot[relay.SlotTopLeft].Title)
+	require.Equal(t, relay.AgentCodex.Color(), bySlot[relay.SlotTopLeft].Color)
+	codex := bySlot[relay.SlotTopLeft].Command
+	require.True(t, strings.HasPrefix(codex, "codex --search '-c' 'developer_instructions=\"[claude-squad] "), codex)
+	require.Contains(t, codex, "/wt/c", "Codex is told where Claude Code works")
+	require.NotContains(t, codex, "/wt/g", "an agent that is not installed is not a peer")
 	require.Equal(t, "claude", bySlot[relay.SlotBottomLeft].Agent)
-	require.True(t, strings.HasPrefix(bySlot[relay.SlotBottomLeft].Command, "/bin/claude '--add-dir' '/cfg' '--settings' "))
+	claude := bySlot[relay.SlotBottomLeft].Command
+	require.True(t, strings.HasPrefix(claude, "/bin/claude '--add-dir' '/cfg' '--append-system-prompt' '[claude-squad] "), claude)
+	require.Contains(t, claude, "- Codex: /wt/x（ブランチ me/codex）")
+	require.Contains(t, claude, "'\\''/bin/cs'\\'' transcript codex", "the transcript command is quoted inside the quoted argument")
 	require.Equal(t, PanelTitle, bySlot[relay.SlotTopRight].Title)
 	require.Equal(t, "'/bin/cs' panel", bySlot[relay.SlotTopRight].Command)
 	require.Equal(t, "/repo", bySlot[relay.SlotTopRight].Dir)
