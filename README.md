@@ -6,10 +6,10 @@
 ![Claude Squad Screenshot](assets/screenshot.png)
 
 ### Highlights
-- Complete tasks in the background (including yolo / auto-accept mode!)
-- Manage instances and tasks in one terminal window
-- Review changes before applying them, checkout changes before pushing them
-- Each task gets its own isolated git workspace, so no conflicts
+- Codex, Claude Code, Gemini and DeepSeek side by side in one tmux dashboard, with a control panel
+- Ask the other agents from any pane with `@codex`, `@claude`, `@gemini`, `@deepseek` or `@all`; their answers come back to the asker
+- Remaining usage of every account at a glance
+- Each agent gets its own isolated git worktree and branch
 
 <br />
 
@@ -47,111 +47,111 @@ curl -fsSL https://raw.githubusercontent.com/smtg-ai/claude-squad/main/install.s
 ### Prerequisites
 
 - [tmux](https://github.com/tmux/tmux/wiki/Installing)
-- [gh](https://cli.github.com/)
+- For DeepSeek: [Reasonix](https://github.com/esengine/DeepSeek-Reasonix) 2.x on `PATH` (tested with v2.35.0), its key registered by running `reasonix` once, its reasoning set to English with `reasonix config reasoning-language en` (by default DeepSeek is told to reason in Chinese, which often carries over into its answers), and [bubblewrap](https://github.com/containers/bubblewrap) (`sudo apt install bubblewrap`) so Reasonix can sandbox its shell
 
 ### Usage
 
 ```
 Usage:
-  cs [flags]
+  cs [dir]
   cs [command]
 
 Available Commands:
-  completion  Generate the autocompletion script for the specified shell
   debug       Print debug information like config paths
-  help        Help about any command
-  reset       Reset all stored instances
-  version     Print the version number of claude-squad
-
-Flags:
-  -y, --autoyes          [experimental] If enabled, all instances will automatically accept prompts for claude code & aider
-  -h, --help             help for claude-squad
-  -p, --program string   Program to run in new instances (e.g. 'aider --model ollama_chat/gemma3:1b')
+  reset       Stop the dashboard and forget the open workspace (worktrees and branches are kept)
+  transcript  Print the conversation of an agent in the open workspace (claude, codex, gemini, deepseek)
+  version     Print the version number
 ```
 
-Run the application with:
+Run `cs`. A launcher asks where to work:
 
-```bash
-cs
-```
-NOTE: The default program is `claude` and we recommend using the latest version.
+- **Open an existing directory.** In a git repository every agent gets its own worktree and branch (`<branch_prefix><agent>`); opening the same repository again reuses them. A repository without commits gets an empty first commit if you agree. A plain directory can be made a repository, whose first commit holds the files already there (refused for the home directory and above), or shared by all agents as is.
+- **Create a new directory** as a git repository with an empty first commit.
+- **Work without a directory**: a throwaway directory under `~/.claude-squad/scratch/` shared by all agents.
+- Recently used directories and the repositories under `projects_dir` (default `~/src`) are listed too.
 
-<br />
+`cs <dir>` skips the launcher. While the dashboard runs, `cs` attaches to it again.
 
-<b>Using Claude Squad with other AI assistants:</b>
-- For [Codex](https://github.com/openai/codex): Set your API key with `export OPENAI_API_KEY=<your_key>`
-- Launch with specific assistants:
-   - Codex: `cs -p "codex"`
-   - Aider: `cs -p "aider ..."`
-   - Gemini: `cs -p "gemini"`
-- Make this the default, by modifying the config file (locate with `cs debug`)
+#### Dashboard
 
-<br />
+The dashboard is a tmux window on its own server (`tmux -L claudesquad`): the agents in a 2×2 grid and the control panel in a full-width row under it.
 
-#### Menu
-The menu at the bottom of the screen shows available commands: 
+| | |
+|---|---|
+| Codex | DeepSeek (Reasonix) |
+| Claude Code | Gemini (Antigravity CLI `agy`) |
+| control panel | |
 
-##### Instance/Session Management
-- `n` - Create a new session
-- `N` - Create a new session with a prompt
-- `D` - Kill (delete) the selected session
-- `↑/j`, `↓/k` - Navigate between sessions
+Click a pane, or move with Shift+arrow keys, to type into it; each agent runs as usual. `C-b z` zooms a pane, `C-b d` detaches and leaves everything running.
 
-##### Actions
-- `↵/o` - Attach to the selected session to reprompt
-- `ctrl-q` - Detach from session
-- `s` - Commit and push branch to github
-- `c` - Checkout. Commits changes and pauses the session
-- `r` - Resume a paused session
-- `?` - Show help menu
+The dashboard answers a few launch screens itself: Codex's Daybreak security reminder and its update offer are skipped (updating is left to you), and every agent's question whether to trust a new worktree is answered yes, pressing Enter only once the trust choice is selected. Trusted, Reasonix runs DeepSeek's edits and commands without asking while its OS sandbox keeps writes inside its worktree. A question to an agent waits while one of these screens shows.
 
-##### Navigation
-- `tab` - Switch between preview tab and diff tab
-- `q` - Quit the application
-- `shift-↓/↑` - scroll in diff view
+The control panel is a fixed 10-row strip, so the agents get the rest of the height; it is fitted again whenever the terminal is resized. It shows:
+
+- **Each agent** on one row: working, idle or stopped, a button to restart it, and the remaining usage of its account: Codex's 5-hour and weekly windows from its session logs, Claude Code's from the status line it reports to `cs statusline` (installed per session with `--settings`), agy's from `agy -p /usage` every 5 minutes, and DeepSeek's prepaid balance from its [balance API](https://api-docs.deepseek.com/api/get-user-balance) every 5 minutes, with the key in `DEEPSEEK_API_KEY` or the one Reasonix saved in `~/.reasonix/.env`. None of these runs a model turn.
+- **Open a work folder** with the Windows folder dialog (under WSL); the dashboard reopens there.
+- **Broadcast**: a box that types the same prompt into every agent.
+- **Auto relay** toggle. Relay events show briefly in the banner, and each pane's title shows the progress of its questions.
+- **Close workspace** stops every agent and removes the worktrees, keeping their branches. Worktrees with uncommitted changes are kept.
+
+Keys in the panel: `i` broadcast box, `a` auto relay, `u` refresh usage, `d` detach.
 
 ### Configuration
 
 Claude Squad stores its configuration in `~/.claude-squad/config.json`. You can find the exact path by running `cs debug`.
 
-#### Profiles
-
-Profiles let you define multiple named program configurations and switch between them when creating a new session. When more than one profile is defined, the session creation overlay shows a profile picker that you can navigate with `←`/`→`.
-
-To configure profiles, add a `profiles` array to your config file and set `default_program` to the name of the profile to select by default:
-
 ```json
 {
-  "default_program": "claude",
+  "branch_prefix": "me/",
+  "projects_dir": "~/src",
   "profiles": [
     { "name": "claude", "program": "claude" },
-    { "name": "codex", "program": "codex" },
-    { "name": "aider", "program": "aider --model ollama_chat/gemma3:1b" }
+    { "name": "codex", "program": "codex --search --sandbox read-only --ask-for-approval never" },
+    { "name": "gemini", "program": "agy --dangerously-skip-permissions" },
+    { "name": "deepseek", "program": "reasonix" }
   ]
 }
 ```
 
-Each profile has two fields:
+| Field           | Description                                                                 |
+|-----------------|-----------------------------------------------------------------------------|
+| `branch_prefix` | Prefix of each agent's branch                                               |
+| `projects_dir`  | Where the launcher lists repositories and creates new directories           |
+| `profiles`      | Commands the agents run with; the agent is recognized from the executable   |
 
-| Field     | Description                                              |
-|-----------|----------------------------------------------------------|
-| `name`    | Display name shown in the profile picker                 |
-| `program` | Shell command used to launch the agent for that profile  |
+An agent without a profile runs its executable from `PATH` (`claude`, `codex`, `agy`, `reasonix`).
 
-If no profiles are defined, Claude Squad uses `default_program` directly as the launch command (the default is `claude`).
+### Asking other agents (Relay)
 
-### FAQs
+Every agent is told at launch which other agents work alongside it, where their worktrees are, and that `cs transcript <agent>` prints their latest conversation, so a plain "what did Codex change?" works without tags. Claude Code gets this through `--append-system-prompt`, Codex through `-c developer_instructions=…`, and agy and Reasonix through a `GEMINI.md` and a `REASONIX.local.md` written into their worktrees and kept out of git with `info/exclude` (skipped in a shared directory, or when the repository has its own file of that name).
 
-#### Failed to start new session
+Start a prompt in an agent's pane with tags to ask the others instead:
 
-If you get an error like `failed to start new session: timed out waiting for tmux session`, update the
-underlying program (ex. `claude`) to the latest version.
+```
+@codex what do you think of this approach?
+@codex @gemini review the last change
+@all which option is safer?
+```
+
+On Enter the prompt is taken out of the input box and typed into each tagged agent's own session, with where the asker's work is (worktree, full transcript, latest exchange). When every recipient has answered, the answers go back into the asking agent as one message:
+
+```
+[ユーザーの質問（@codex 宛て）]
+what do you think of this approach?
+
+[Codexの意見]
+...
+```
+
+A question waits while its recipient is busy, and the answers wait while the asker is busy. Each pane's title shows the progress (`Q: … → Codex … · Gemini ✓`).
+
+With auto relay on, a tag in an agent's own reply asks the tagged agents the same way and sends the answers back to it. Auto relay turns itself off after 6 questions.
 
 ### How It Works
 
-1. **tmux** to create isolated terminal sessions for each agent
-2. **git worktrees** to isolate codebases so each session works on its own branch
-3. A simple TUI interface for easy navigation and management
+1. **tmux**, on its own server, shows every agent and the control panel side by side. Enter on an agent pane goes through `cs hook`, which asks the panel whether the input starts with a tag.
+2. **git worktrees** isolate codebases so each agent works on its own branch
+3. Each CLI's session log or screen tells when an agent has finished a reply
 
 ### License
 
