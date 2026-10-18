@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -24,8 +25,8 @@ var (
 	binName string
 	rootCmd = &cobra.Command{
 		Use:   "claude-squad [dir]",
-		Short: "Claude Squad - Codex, Claude Code and Gemini side by side, asking each other with @tags.",
-		Long: "Starts Codex, Claude Code and Gemini (agy) in a 2×2 tmux dashboard with a control panel.\n" +
+		Short: "Claude Squad - Codex, Claude Code, Gemini and DeepSeek side by side, asking each other with @tags.",
+		Long: "Starts Codex, Claude Code, Gemini (agy) and DeepSeek (Reasonix) in a tmux dashboard with a control panel.\n" +
 			"Without dir, a launcher asks where to work. While the dashboard is running, this attaches to it.",
 		Args:         cobra.MaximumNArgs(1),
 		SilenceUsage: true,
@@ -130,7 +131,7 @@ var (
 
 	transcriptCmd = &cobra.Command{
 		Use:   "transcript <agent>",
-		Short: "Print the conversation of an agent in the open workspace (claude, codex or gemini)",
+		Short: "Print the conversation of an agent in the open workspace (" + strings.Join(agentNames(), ", ") + ")",
 		Long: "Prints the latest conversation of an agent in the open workspace, read from its CLI's own session log.\n" +
 			"Agents are told about this command at launch, so they can read each other's conversations.",
 		Args: cobra.ExactArgs(1),
@@ -147,7 +148,7 @@ var (
 			agent := relay.AgentByName(args[0])
 			m, ok := ws.Member(agent.Name())
 			if agent == relay.AgentUnknown || !ok {
-				return fmt.Errorf("%q はこのワークスペースのAIではありません（claude / codex / gemini）", args[0])
+				return fmt.Errorf("%q はこのワークスペースのAIではありません（%s）", args[0], strings.Join(agentNames(), " / "))
 			}
 			transcript, err := agent.Transcript(m.Dir)
 			if err != nil {
@@ -247,7 +248,7 @@ func start(tmux *dashboard.Tmux, cfg *config.Config, state *config.State, config
 		return err
 	}
 	if err := workspace.WriteBriefings(ws, self); err != nil {
-		// Only agy goes without its briefing; the dashboard still starts.
+		// Only the agents briefed through a file go without; the dashboard still starts.
 		log.ErrorLog.Printf("write briefings: %v", err)
 	}
 	width, height, err := term.GetSize(int(os.Stdout.Fd()))
@@ -255,6 +256,15 @@ func start(tmux *dashboard.Tmux, cfg *config.Config, state *config.State, config
 		width, height = 200, 50
 	}
 	return tmux.Create(dashboard.Layout(ws, self, configDir), width, height-1, self)
+}
+
+// agentNames are the names `cs transcript` takes.
+func agentNames() []string {
+	var names []string
+	for _, a := range relay.Agents() {
+		names = append(names, a.Name())
+	}
+	return names
 }
 
 func init() {

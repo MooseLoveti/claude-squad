@@ -145,6 +145,50 @@ func findClaudeLogIn(root, cwd string) (string, error) {
 	return path, nil
 }
 
+func reasonixHome() (string, error) {
+	return envOrHome("REASONIX_HOME", ".reasonix")
+}
+
+// reasonixProjectDir mirrors how Reasonix names a project's directory: the
+// path with every slash made a dash.
+func reasonixProjectDir(cwd string) string {
+	return strings.ReplaceAll(cwd, "/", "-")
+}
+
+// reasonixWireSuffix ends a session's event log, which Reasonix appends to as
+// a turn goes: turn_started (the prompt), message (assistant text, or only
+// reasoning), tool calls, and turn_done once the turn ends or is cancelled.
+const reasonixWireSuffix = ".wire.jsonl"
+
+func findReasonixLog(cwd string) (string, error) {
+	root, err := reasonixHome()
+	if err != nil {
+		return "", err
+	}
+	return findReasonixLogIn(root, cwd)
+}
+
+func findReasonixLogIn(root, cwd string) (string, error) {
+	dir := filepath.Join(root, "projects", reasonixProjectDir(cwd), "sessions")
+	// The directory keeps the path's other characters, so it is listed rather
+	// than globbed: a [ or * in the path would be a pattern.
+	entries, err := os.ReadDir(dir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	var matches []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), reasonixWireSuffix) {
+			matches = append(matches, filepath.Join(dir, e.Name()))
+		}
+	}
+	path := newestFile(matches)
+	if path == "" {
+		return "", fmt.Errorf("no Reasonix session log in %s", dir)
+	}
+	return path, nil
+}
+
 func findCodexLog(cwd string) (string, error) {
 	root, err := envOrHome("CODEX_HOME", ".codex")
 	if err != nil {
@@ -518,4 +562,141 @@ func eachJSONLine(r io.Reader, fn func([]byte)) error {
 			return err
 		}
 	}
+}
+
+// reasonixPaste is a pasted block as a prompt's text records it: the prompt
+// shows a "[Pasted text #1 · 5 lines]" placeholder, and the pasted text
+// follows the prompt between Begin and End lines.
+var reasonixPaste = regexp.MustCompile(`(?s)\n*--- Begin (\[Pasted text #\d+[^\]\n]*\]) ---\n(.*?)\n--- End \[Pasted text #\d+[^\]\n]*\] ---`)
+
+// reasonixUserText puts every pasted block back where its placeholder is.
+func reasonixUserText(text string) string {
+	for _, m := range reasonixPaste.FindAllStringSubmatch(text, -1) {
+		placeholder, pasted := m[1], m[2]
+		text = strings.Replace(text, m[0], "", 1)
+		if strings.Contains(text, placeholder) {
+			text = strings.Replace(text, placeholder, pasted, 1)
+		} else {
+			text += "\n" + pasted
+		}
+	}
+	return text
+}
+
+type reasonixEvent struct {
+	Kind      string `json:"kind"`
+	Text      string `json:"text"`
+	Seq       int    `json:"seq"`
+	Cancelled bool   `json:"cancelled"`
+}
+
+func readReasonixEvents(r io.Reader) ([]reasonixEvent, error) {
+	var events []reasonixEvent
+	err := eachJSONLine(r, func(line []byte) {
+		var e reasonixEvent
+		// The line being written may be cut off; it is read on the next poll.
+		if json.Unmarshal(line, &e) == nil {
+			events = append(events, e)
+		}
+	})
+	return events, err
+}
+
+func parseReasonixLog(r io.Reader) ([]turn, error) {
+	events, err := readReasonixEvents(r)
+	if err != nil {
+		return nil, err
+	}
+	var turns []turn
+	for _, e := range events {
+		switch e.Kind {
+		case "turn_started":
+			turns = appendTurn(turns, roleUser, reasonixUserText(e.Text))
+		case "message":
+			turns = appendTurn(turns, roleAssistant, e.Text)
+		}
+	}
+	if len(turns) == 0 {
+		return nil, errors.New("no conversation messages found")
+	}
+	return turns, nil
+}
+
+// latestReasonixTurn returns the events of the latest turn, and whether it
+// has ended.
+func latestReasonixTurn(events []reasonixEvent) ([]reasonixEvent, bool) {
+	start := -1
+	for i, e := range events {
+		if e.Kind == "turn_started" {
+			start = i
+		}
+	}
+	if start < 0 {
+		return nil, false
+	}
+	turn := events[start:]
+	for _, e := range turn {
+		if e.Kind == "turn_done" {
+			return turn, true
+		}
+	}
+	return turn, false
+}
+
+// latestReasonixReply is the latest turn's last assistant text, once the turn
+// has ended; text before the turn's last tool call only announces it. A
+// cancelled turn has no reply.
+func latestReasonixReply(r io.Reader) (string, string, error) {
+	events, err := readReasonixEvents(r)
+	if err != nil {
+		return "", "", err
+	}
+	turn, _ := latestReasonixTurn(events)
+	var reply string
+	for _, e := range turn {
+		switch {
+		case e.Kind == "message" && strings.TrimSpace(e.Text) != "":
+			reply = e.Text
+		case e.Kind == "turn_done" && !e.Cancelled && reply != "":
+			return strings.TrimSpace(reply), strconv.Itoa(e.Seq), nil
+		case e.Kind == "turn_done":
+			return "", "", errors.New("the latest DeepSeek turn ended without a reply")
+		}
+	}
+	return "", "", errors.New("no completed DeepSeek reply to the latest prompt yet")
+}
+
+func reasonixLatestReply(cwd string) (string, string, error) {
+	path, err := findReasonixLog(cwd)
+	if err != nil {
+		return "", "", err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", "", fmt.Errorf("open Reasonix session log: %w", err)
+	}
+	defer f.Close()
+	return latestReasonixReply(f)
+}
+
+func reasonixEventsBusy(r io.Reader) bool {
+	events, err := readReasonixEvents(r)
+	if err != nil {
+		return false
+	}
+	turn, done := latestReasonixTurn(events)
+	return turn != nil && !done
+}
+
+func reasonixBusy(cwd string) bool {
+	path, err := findReasonixLog(cwd)
+	if err != nil {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	return reasonixEventsBusy(f)
 }

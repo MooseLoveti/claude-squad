@@ -24,29 +24,34 @@ func Briefing(w *Workspace, m Member, exe string) string {
 	return relay.Briefing(relay.AgentByName(m.Agent), m.Dir, peers, exe)
 }
 
-// geminiFile is the instructions file agy reads from its working directory.
-const geminiFile = "GEMINI.md"
-
-// briefingMarker starts every briefing, telling a GEMINI.md written here from
-// one the user wrote.
+// briefingMarker starts every briefing, telling an instructions file written
+// here from one the user wrote.
 const briefingMarker = "[claude-squad]"
 
-// WriteBriefings gives agy, which takes no instructions on its command line,
-// its briefing as a GEMINI.md in its own worktree, kept out of git through the
-// repository's info/exclude. A shared directory is the user's own, and a
-// GEMINI.md the repository tracks or the user wrote is theirs, so neither is
-// touched; agy then starts without a briefing.
+// WriteBriefings gives each agent that takes no instructions on its command
+// line its briefing as the instructions file it reads from its own worktree,
+// kept out of git through the repository's info/exclude. A shared directory is
+// the user's own, and a file the repository tracks or the user wrote is
+// theirs, so neither is touched; that agent then starts without a briefing.
 func WriteBriefings(w *Workspace, exe string) error {
-	m, ok := w.Member(relay.AgentAntigravity.Name())
-	// In a shared directory every member runs in w.Dir.
-	if !ok || m.Program == "" || m.Dir == w.Dir {
-		return nil
+	for _, m := range w.Members {
+		file := relay.AgentByName(m.Agent).BriefingFile()
+		// In a shared directory every member runs in w.Dir.
+		if file == "" || m.Program == "" || m.Dir == w.Dir {
+			continue
+		}
+		if err := writeBriefing(m.Dir, file, Briefing(w, m, exe)); err != nil {
+			return err
+		}
 	}
-	briefing := Briefing(w, m, exe)
+	return nil
+}
+
+func writeBriefing(dir, file, briefing string) error {
 	if briefing == "" {
 		return nil
 	}
-	path := filepath.Join(m.Dir, geminiFile)
+	path := filepath.Join(dir, file)
 	existing, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -55,10 +60,10 @@ func WriteBriefings(w *Workspace, exe string) error {
 	case !strings.HasPrefix(string(existing), briefingMarker):
 		return nil
 	}
-	if _, err := gitOutput(m.Dir, "ls-files", "--error-unmatch", geminiFile); err == nil {
+	if _, err := gitOutput(dir, "ls-files", "--error-unmatch", file); err == nil {
 		return nil
 	}
-	if err := excludeFromGit(m.Dir, "/"+geminiFile); err != nil {
+	if err := excludeFromGit(dir, "/"+file); err != nil {
 		return err
 	}
 	return os.WriteFile(path, []byte(briefing+"\n"), 0o644)

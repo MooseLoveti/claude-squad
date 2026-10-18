@@ -50,6 +50,7 @@ func testConfig() *config.Config {
 		{Name: "claude", Program: "/opt/claude"},
 		{Name: "codex", Program: "/opt/codex --search"},
 		{Name: "gemini", Program: "/opt/agy --dangerously-skip-permissions"},
+		{Name: "deepseek", Program: "/opt/reasonix"},
 	}}
 }
 
@@ -154,7 +155,7 @@ func TestOpenGivesEachAgentAWorktreeAndReusesIt(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, KindGit, ws.Kind)
 	require.Equal(t, repo, ws.Dir)
-	require.Len(t, ws.Members, 3)
+	require.Len(t, ws.Members, len(relay.Agents()))
 	worktrees := filepath.Join(home, ".claude-squad", "worktrees")
 	for _, m := range ws.Members {
 		require.Equal(t, "t/"+m.Agent, m.Branch)

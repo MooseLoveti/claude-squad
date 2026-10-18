@@ -24,7 +24,13 @@ func TestBriefingNamesTheOtherInstalledMembers(t *testing.T) {
 	require.Empty(t, Briefing(alone, alone.Members[0], "cs"), "nobody to tell about")
 }
 
-func TestWriteBriefingsGivesAgyAGeminiFileOutsideGit(t *testing.T) {
+// The instructions files agy and Reasonix read their briefings from.
+const (
+	geminiFile   = "GEMINI.md"
+	reasonixFile = "REASONIX.local.md"
+)
+
+func TestWriteBriefingsGivesFileBriefedAgentsTheirFileOutsideGit(t *testing.T) {
 	isolate(t)
 	repo := newRepo(t)
 	ws, err := Open(repo, false, testConfig())
@@ -38,6 +44,13 @@ func TestWriteBriefingsGivesAgyAGeminiFileOutsideGit(t *testing.T) {
 	require.True(t, strings.HasPrefix(string(data), "[claude-squad] あなたは claude-squad で動いている Gemini です。"), string(data))
 	require.Empty(t, runGit(t, gemini.Dir, "status", "--porcelain"), "GEMINI.md stays out of git")
 
+	deepseek, _ := ws.Member("deepseek")
+	data, err = os.ReadFile(filepath.Join(deepseek.Dir, reasonixFile))
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(string(data), "[claude-squad] あなたは claude-squad で動いている DeepSeek です。"), string(data))
+	require.Empty(t, runGit(t, deepseek.Dir, "status", "--porcelain"), "REASONIX.local.md stays out of git")
+	require.NoFileExists(t, filepath.Join(deepseek.Dir, geminiFile), "each agent gets only its own file")
+
 	// A reopened workspace rewrites its own briefing without excluding twice.
 	require.NoError(t, WriteBriefings(ws, "/bin/cs2"))
 	data, err = os.ReadFile(file)
@@ -46,10 +59,12 @@ func TestWriteBriefingsGivesAgyAGeminiFileOutsideGit(t *testing.T) {
 	exclude, err := os.ReadFile(filepath.Join(repo, ".git", "info", "exclude"))
 	require.NoError(t, err)
 	require.Equal(t, 1, strings.Count(string(exclude), "/GEMINI.md\n"))
+	require.Equal(t, 1, strings.Count(string(exclude), "/REASONIX.local.md\n"))
 
 	for _, m := range ws.Members {
-		if m.Agent != "gemini" {
-			require.NoFileExists(t, filepath.Join(m.Dir, geminiFile), "the others take theirs on the command line")
+		if m.Agent == "claude" || m.Agent == "codex" {
+			require.NoFileExists(t, filepath.Join(m.Dir, geminiFile), "they take theirs on the command line")
+			require.NoFileExists(t, filepath.Join(m.Dir, reasonixFile), "they take theirs on the command line")
 		}
 	}
 }
@@ -87,4 +102,5 @@ func TestWriteBriefingsSkipsASharedDirectory(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, WriteBriefings(ws, "cs"))
 	require.NoFileExists(t, filepath.Join(dir, geminiFile), "a shared directory is the user's own")
+	require.NoFileExists(t, filepath.Join(dir, reasonixFile), "a shared directory is the user's own")
 }

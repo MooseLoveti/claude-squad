@@ -97,8 +97,9 @@ func (t *Tmux) Running() bool {
 	return t.run("has-session", "-t", "="+Session) == nil
 }
 
-// Create starts the dashboard with one pane per slot, laid out 2×2, and
-// configures the server. self is the claude-squad executable, which the Enter
+// Create starts the dashboard with one pane per slot, in slot order, and
+// configures the server. tmux's tiled layout puts four panes in a 2×2 grid
+// and a fifth in a full-width row under it. self is the claude-squad executable, which the Enter
 // key binding calls as `self hook enter <pane>`.
 func (t *Tmux) Create(panes []Pane, width, height int, self string) error {
 	if len(panes) == 0 {

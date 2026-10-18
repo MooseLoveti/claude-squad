@@ -170,6 +170,20 @@ func TestUsageShowsHealthBarsAndIgnoresStaleRefreshes(t *testing.T) {
 	require.Nil(t, cmd)
 }
 
+func TestUsageShowsAPrepaidBalance(t *testing.T) {
+	p := newTestModel(t, 110, 30)
+	p.Update(usageMsg{agent: relay.AgentCodex, usage: relay.Usage{Updated: p.now, Balances: []relay.Balance{
+		{Amount: "9.87", Currency: "USD", Available: true},
+	}}})
+	require.Contains(t, p.plain(), "残高 $9.87")
+	require.NotContains(t, p.plain(), "チャージが必要です")
+
+	p.Update(usageMsg{agent: relay.AgentCodex, usage: relay.Usage{Updated: p.now, Balances: []relay.Balance{
+		{Amount: "0.00", Currency: "CNY", Available: false},
+	}}})
+	require.Contains(t, p.plain(), "残高 ¥0.00 💸 チャージが必要です")
+}
+
 func TestAgentStates(t *testing.T) {
 	p := newTestModel(t, 110, 30)
 	p.Update(panesMsg{dead: map[relay.Agent]bool{relay.AgentCodex: true}})
@@ -224,7 +238,7 @@ func TestFolderChoicesThatNeedPreparing(t *testing.T) {
 	view := p.plain()
 	require.Contains(t, view, "git で管理されていないフォルダです")
 	require.Contains(t, view, "🌿git管理にしてAIごとに作業コピー")
-	require.Contains(t, view, "🤝3つのAIで直接共有")
+	require.Contains(t, view, "🤝全員で直接共有")
 
 	empty := t.TempDir()
 	require.NoError(t, exec.Command("git", "-C", empty, "init", "-q").Run())

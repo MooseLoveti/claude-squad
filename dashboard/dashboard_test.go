@@ -65,7 +65,8 @@ func (r *recorder) commands() []string {
 func testPanes() []Pane {
 	return []Pane{
 		{Slot: relay.SlotBottomRight, Agent: "gemini", Title: "Gemini", Dir: "/wt/g", Command: "agy"},
-		{Slot: relay.SlotTopRight, Title: PanelTitle, Dir: "/repo", Command: "'/bin/cs' panel"},
+		{Slot: relay.SlotBottom, Title: PanelTitle, Dir: "/repo", Command: "'/bin/cs' panel"},
+		{Slot: relay.SlotTopRight, Agent: "deepseek", Title: "DeepSeek", Dir: "/wt/d", Command: "reasonix"},
 		{Slot: relay.SlotTopLeft, Agent: "codex", Title: "Codex", Dir: "/wt/x", Command: "codex"},
 		{Slot: relay.SlotBottomLeft, Agent: "claude", Title: "Claude Code", Dir: "/wt/c", Command: "claude"},
 	}
@@ -77,18 +78,22 @@ func TestCreateLaysOutPanesBySlot(t *testing.T) {
 	require.NoError(t, tmux.Create(testPanes(), 200, 50, "/bin/cs"))
 
 	cmds := rec.commands()
-	// Panes are created top-left, top-right, bottom-left, bottom-right, which
-	// is the order a tiled 2×2 layout places them in.
+	// Panes are created top-left, top-right, bottom-left, bottom-right, then
+	// the panel, which is the order a tiled layout places them in: a 2×2 grid
+	// and a full-width row under it.
 	require.Equal(t, "new-session -d -s squad -x 200 -y 50 -c /wt/x -P -F #{pane_id} codex", cmds[0])
 	require.Equal(t, "select-layout -t squad tiled", cmds[1])
-	require.Equal(t, "split-window -t squad -c /repo -P -F #{pane_id} '/bin/cs' panel", cmds[2])
+	require.Equal(t, "split-window -t squad -c /wt/d -P -F #{pane_id} reasonix", cmds[2])
 	require.Equal(t, "split-window -t squad -c /wt/c -P -F #{pane_id} claude", cmds[4])
 	require.Equal(t, "split-window -t squad -c /wt/g -P -F #{pane_id} agy", cmds[6])
+	require.Equal(t, "split-window -t squad -c /repo -P -F #{pane_id} '/bin/cs' panel", cmds[8])
+	require.Equal(t, "select-layout -t squad tiled", cmds[9])
 	require.Contains(t, cmds, "set-option -p -t %1 @cs_agent codex")
-	require.Contains(t, cmds, "set-option -p -t %2 @cs_title "+PanelTitle)
-	require.NotContains(t, cmds, "set-option -p -t %2 @cs_agent ", "the panel is no agent")
+	require.Contains(t, cmds, "set-option -p -t %2 @cs_agent deepseek")
 	require.Contains(t, cmds, "set-option -p -t %3 @cs_agent claude")
 	require.Contains(t, cmds, "set-option -p -t %4 @cs_agent gemini")
+	require.Contains(t, cmds, "set-option -p -t %5 @cs_title "+PanelTitle)
+	require.NotContains(t, cmds, "set-option -p -t %5 @cs_agent ", "the panel is no agent")
 	require.Contains(t, cmds, `bind-key -n Enter if-shell -F #{@cs_agent} run-shell "'/bin/cs' hook enter #{pane_id}" send-keys Enter`)
 	require.Contains(t, cmds, "set-option -g mouse on")
 	require.Contains(t, cmds, "set-option -g pane-border-lines heavy")
@@ -174,18 +179,19 @@ func TestShellCommandQuotesArguments(t *testing.T) {
 	require.Equal(t, "codex --search", ShellCommand("codex --search", nil))
 }
 
-func TestLayoutPutsThePanelInTheFreeSlot(t *testing.T) {
+func TestLayoutPutsAgentsInTheGridAndThePanelUnderIt(t *testing.T) {
 	ws := &workspace.Workspace{Dir: "/repo", Kind: workspace.KindGit, Members: []workspace.Member{
 		{Agent: "claude", Dir: "/wt/c", Branch: "me/claude", Program: "/bin/claude"},
 		{Agent: "codex", Dir: "/wt/x", Branch: "me/codex", Program: "codex --search"},
 		{Agent: "gemini", Dir: "/wt/g", Program: ""},
+		{Agent: "deepseek", Dir: "/wt/d", Branch: "me/deepseek", Program: "reasonix"},
 	}}
 	panes := Layout(ws, "/bin/cs", "/cfg")
 	bySlot := map[relay.Slot]Pane{}
 	for _, p := range panes {
 		bySlot[p.Slot] = p
 	}
-	require.Len(t, bySlot, 4)
+	require.Len(t, bySlot, 5)
 	require.Equal(t, "codex", bySlot[relay.SlotTopLeft].Agent)
 	require.Equal(t, "🤖 Codex ⎇ me/codex", bySlot[relay.SlotTopLeft].Title)
 	require.Equal(t, relay.AgentCodex.Color(), bySlot[relay.SlotTopLeft].Color)
@@ -198,9 +204,12 @@ func TestLayoutPutsThePanelInTheFreeSlot(t *testing.T) {
 	require.True(t, strings.HasPrefix(claude, "/bin/claude '--add-dir' '/cfg' '--append-system-prompt' '[claude-squad] "), claude)
 	require.Contains(t, claude, "- Codex: /wt/x（ブランチ me/codex）")
 	require.Contains(t, claude, "'\\''/bin/cs'\\'' transcript codex", "the transcript command is quoted inside the quoted argument")
-	require.Equal(t, PanelTitle, bySlot[relay.SlotTopRight].Title)
-	require.Equal(t, "'/bin/cs' panel", bySlot[relay.SlotTopRight].Command)
-	require.Equal(t, "/repo", bySlot[relay.SlotTopRight].Dir)
+	require.Equal(t, "deepseek", bySlot[relay.SlotTopRight].Agent)
+	require.Equal(t, "reasonix", bySlot[relay.SlotTopRight].Command, "Reasonix is briefed through a file")
+	require.Contains(t, claude, "- DeepSeek: /wt/d（ブランチ me/deepseek）")
+	require.Equal(t, PanelTitle, bySlot[relay.SlotBottom].Title)
+	require.Equal(t, "'/bin/cs' panel", bySlot[relay.SlotBottom].Command)
+	require.Equal(t, "/repo", bySlot[relay.SlotBottom].Dir)
 	require.Contains(t, bySlot[relay.SlotBottomRight].Command, "Gemini (agy) が見つかりません", "a missing agent explains itself")
 	require.Contains(t, bySlot[relay.SlotBottomRight].Command, "config.json")
 }

@@ -406,7 +406,7 @@ func (m *model) View() string {
 	case confirmNotGit:
 		add("  " + askStyle.Render(pretty(m.pending)+" は git で管理されていないフォルダです。どう開きますか？"))
 		add("  " + askStyle.Render("g: git 管理を始める（今あるファイルを最初のコミットにして、AIごとに別の作業コピーとブランチを作る）"))
-		add("  " + askStyle.Render("s: 3つのAIでこのフォルダを直接共有する（git は使わない。同じファイルを同時に触るので衝突に注意）"))
+		add("  " + askStyle.Render("s: 全員でこのフォルダを直接共有する（git は使わない。同じファイルを同時に触るので衝突に注意）"))
 		add("  " + askStyle.Render("ほかのキー: 戻る"))
 	}
 	if m.err != "" {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,10 +28,33 @@ type UsageWindow struct {
 	ResetsAt time.Time
 }
 
-// Usage is an account's remaining rate limits as of Updated.
+// Balance is a prepaid account's remaining money.
+type Balance struct {
+	// Amount is the balance as the provider writes it, such as "12.34".
+	Amount   string
+	Currency string
+	// Available is false when the balance no longer covers a request.
+	Available bool
+}
+
+// Symbol is the sign written before the amount, or the currency code with a
+// space for a currency without one here.
+func (b Balance) Symbol() string {
+	switch b.Currency {
+	case "USD":
+		return "$"
+	case "CNY":
+		return "¥"
+	}
+	return b.Currency + " "
+}
+
+// Usage is an account's remaining rate limits, or for a prepaid account its
+// balance, as of Updated.
 type Usage struct {
-	Windows []UsageWindow
-	Updated time.Time
+	Windows  []UsageWindow
+	Balances []Balance
+	Updated  time.Time
 }
 
 // UsageEnv is what reading an agent's usage may need.
@@ -394,6 +418,104 @@ func writeFileAtomic(path string, data []byte) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+// deepseekBalanceURL reports a DeepSeek account's balance without running a
+// model; see https://api-docs.deepseek.com/api/get-user-balance.
+var deepseekBalanceURL = "https://api.deepseek.com/user/balance"
+
+const deepseekUsageTimeout = 30 * time.Second
+
+// deepseekKeyVar names the API key in the environment and in Reasonix's .env.
+const deepseekKeyVar = "DEEPSEEK_API_KEY"
+
+// deepseekUsage reads the account balance with the key Reasonix uses: the
+// environment's, or else the one `reasonix setup` saved.
+func deepseekUsage(ctx context.Context, env UsageEnv) (Usage, error) {
+	key, err := deepseekKey()
+	if err != nil {
+		return Usage{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, deepseekUsageTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, deepseekBalanceURL, nil)
+	if err != nil {
+		return Usage{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Accept", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return Usage{}, fmt.Errorf("DeepSeek の残高: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return Usage{}, fmt.Errorf("DeepSeek の残高: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return Usage{}, fmt.Errorf("DeepSeek の残高: HTTP %d", resp.StatusCode)
+	}
+	return parseDeepSeekBalance(body, env.now())
+}
+
+func parseDeepSeekBalance(body []byte, now time.Time) (Usage, error) {
+	var result struct {
+		IsAvailable  bool `json:"is_available"`
+		BalanceInfos []struct {
+			Currency     string `json:"currency"`
+			TotalBalance string `json:"total_balance"`
+		} `json:"balance_infos"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return Usage{}, fmt.Errorf("parse DeepSeek balance: %w", err)
+	}
+	usage := Usage{Updated: now}
+	for _, info := range result.BalanceInfos {
+		usage.Balances = append(usage.Balances, Balance{Amount: info.TotalBalance, Currency: info.Currency, Available: result.IsAvailable})
+	}
+	if len(usage.Balances) == 0 {
+		return Usage{}, errors.New("DeepSeek から残高が返ってきませんでした")
+	}
+	return usage, nil
+}
+
+// deepseekKey is the API key from the environment, or else from the .env in
+// Reasonix's home ($REASONIX_HOME, by default ~/.reasonix).
+func deepseekKey() (string, error) {
+	if key := os.Getenv(deepseekKeyVar); key != "" {
+		return key, nil
+	}
+	home, err := reasonixHome()
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".env"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	if key := dotenvValue(string(data), deepseekKeyVar); key != "" {
+		return key, nil
+	}
+	return "", errors.New("DeepSeek の API キーがありません（reasonix を起動してキーを登録してください）")
+}
+
+// dotenvValue reads name from .env text: NAME=value lines, optionally with
+// "export " in front and the value in quotes.
+func dotenvValue(text, name string) string {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimPrefix(strings.TrimSpace(line), "export ")
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(key) != name {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if unquoted, err := strconv.Unquote(value); err == nil {
+			return unquoted
+		}
+		return strings.Trim(value, "'")
+	}
+	return ""
 }
 
 // agyUsageTimeout bounds the network call behind agy's /usage command.

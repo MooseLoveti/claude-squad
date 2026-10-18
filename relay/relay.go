@@ -22,9 +22,11 @@ const (
 	AgentClaude
 	AgentCodex
 	AgentAntigravity
+	AgentDeepSeek
 )
 
-// Slot is a pane position in the 2×2 dashboard.
+// Slot is a pane position in the dashboard: agents in a 2×2 grid, the control
+// panel in a full-width row under it.
 type Slot int
 
 const (
@@ -32,6 +34,7 @@ const (
 	SlotTopRight
 	SlotBottomLeft
 	SlotBottomRight
+	SlotBottom
 )
 
 // LaunchEnv is what an agent's launch arguments may refer to.
@@ -83,6 +86,10 @@ type agentSpec struct {
 	// stops on a permission prompt, pass the briefing, and wire up usage
 	// reporting.
 	launchArgs func(env LaunchEnv) []string
+	// briefingFile is the instructions file the CLI reads from its working
+	// directory, for CLIs that take no instructions on their command line; the
+	// briefing is written there.
+	briefingFile string
 	// startupNotices are notices the CLI may show at launch that need no
 	// answer; the dashboard dismisses them.
 	startupNotices []startupNotice
@@ -100,7 +107,7 @@ type startupNotice struct {
 }
 
 // relayAgents fixes the iteration order so routing and detection are deterministic.
-var relayAgents = []Agent{AgentClaude, AgentCodex, AgentAntigravity}
+var relayAgents = []Agent{AgentClaude, AgentCodex, AgentAntigravity, AgentDeepSeek}
 
 var specs = map[Agent]agentSpec{
 	AgentClaude: {
@@ -156,14 +163,36 @@ var specs = map[Agent]agentSpec{
 		latestReply: agyLatestReply,
 		logBusy:     agyBusy,
 		// --add-dir makes agy run commands in the added directory instead of
-		// its own worktree; reads outside the workspace ask once instead. agy
-		// takes no instructions on its command line, so its briefing is a
-		// GEMINI.md written into its worktree.
-		launchArgs: func(LaunchEnv) []string { return nil },
-		findLog:    findAgyLog,
-		parseLog:   parseAgyLog,
-		usage:      agyUsage,
-		usagePoll:  networkUsagePoll,
+		// its own worktree; reads outside the workspace ask once instead.
+		launchArgs:   func(LaunchEnv) []string { return nil },
+		briefingFile: "GEMINI.md",
+		findLog:      findAgyLog,
+		parseLog:     parseAgyLog,
+		usage:        agyUsage,
+		usagePoll:    networkUsagePoll,
+	},
+	AgentDeepSeek: {
+		executable: "reasonix",
+		label:      "DeepSeek",
+		emoji:      "🐋",
+		color:      "#4D6BFE",
+		slot:       SlotTopRight,
+		tags:       []string{"@deepseek", "@reasonix"},
+		// The input box is indented one column; continuation lines by three.
+		inputPrefix: " ❯",
+		// The pane shows replies without a marker, so they come from the
+		// session's event log, which marks where each turn ends.
+		latestReply: reasonixLatestReply,
+		logBusy:     reasonixBusy,
+		// Reasonix reads files anywhere and its sandboxed shell can read the
+		// home directory, so peers' worktrees need no flag; --add-dir would
+		// make them writable.
+		launchArgs:   func(LaunchEnv) []string { return nil },
+		briefingFile: "REASONIX.local.md",
+		findLog:      findReasonixLog,
+		parseLog:     parseReasonixLog,
+		usage:        deepseekUsage,
+		usagePoll:    networkUsagePoll,
 	},
 }
 
@@ -229,6 +258,12 @@ func (a Agent) Emoji() string {
 // Color is the agent's theme color as "#RRGGBB".
 func (a Agent) Color() string {
 	return specs[a].color
+}
+
+// BriefingFile is the instructions file the briefing is written to, or "" when
+// the briefing goes on the command line.
+func (a Agent) BriefingFile() string {
+	return specs[a].briefingFile
 }
 
 // Slot is where the agent's pane sits in the dashboard.

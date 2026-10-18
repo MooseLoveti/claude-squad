@@ -5,6 +5,7 @@ import (
 	"claude-squad/workspace"
 	"errors"
 	"fmt"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -20,10 +21,18 @@ const (
 	compactWidth = 80
 
 	broadcastHint   = "クリックして全員に一斉送信"
-	idleHint        = "💡 AIのペインで先頭に @codex / @claude / @gemini / @all と書くと相談できる"
 	compactIdleHint = "💡 先頭に @codex や @all で相談！"
 	keyHelp         = "i:入力 a:自動Relay u:使用量 l:ログ d:デタッチ"
 )
+
+// idleHint lists every agent's tag, so a new agent shows up in it.
+var idleHint = func() string {
+	var tags []string
+	for _, a := range relay.Agents() {
+		tags = append(tags, a.Tag())
+	}
+	return "💡 AIのペインで先頭に " + strings.Join(append(tags, "@all"), " / ") + " と書くと相談できる"
+}()
 
 var eventIcons = map[EventKind]string{
 	EventInfo:      "💬",
@@ -110,6 +119,17 @@ func (m *Model) viewUsage(s *screen, agent relay.Agent) {
 			r.add(fmt.Sprintf("%4.0f%% ", w.Remaining*100), pct)
 			if m.width >= wideWidth {
 				r.add(padRight(countdown(w.ResetsAt, m.now), 10), dimStyle)
+			}
+		}
+		for _, b := range state.usage.Balances {
+			r.add("残高 ", dimStyle)
+			amount := fg(mint).Bold(true)
+			if !b.Available {
+				amount = fg(hot).Bold(true)
+			}
+			r.add(b.Symbol()+b.Amount+" ", amount)
+			if !b.Available {
+				r.add("💸 チャージが必要です ", errorStyle)
 			}
 		}
 		if a := age(state.usage.Updated, m.now); a != "" && m.width >= wideWidth {
@@ -210,9 +230,9 @@ func (m *Model) footer() []*row {
 			r.button("✨初期コミットを作って切り替え", button(gold), func() tea.Cmd { return m.switchTo(workspace.InitialCommit) })
 		case plan.kind == workspace.KindShared:
 			rows = append(rows, (&row{}).raw("📂 "+dir+noticeStyle.Render(" は git で管理されていないフォルダです（今のAIは止まります）")))
-			rows = append(rows, (&row{}).add("🌿 今あるファイルを最初のコミットにして、AIごとに別の作業コピーを作る ／ 🤝 3つのAIでこのフォルダを直接編集する", noticeStyle))
+			rows = append(rows, (&row{}).add("🌿 今あるファイルを最初のコミットにして、AIごとに別の作業コピーを作る ／ 🤝 全員でこのフォルダを直接編集する", noticeStyle))
 			r.button("🌿git管理にしてAIごとに作業コピー", button(gold), func() tea.Cmd { return m.switchTo(workspace.InitRepo) })
-			r.button("🤝3つのAIで直接共有", button(cyan), func() tea.Cmd { return m.switchTo(nil) })
+			r.button("🤝全員で直接共有", button(cyan), func() tea.Cmd { return m.switchTo(nil) })
 		default:
 			rows = append(rows, (&row{}).raw("📂 "+dir+noticeStyle.Render(" に切り替えますか？（今のAIは止まります）")))
 			r.button("🔀切り替える", button(gold), func() tea.Cmd { return m.switchTo(nil) })

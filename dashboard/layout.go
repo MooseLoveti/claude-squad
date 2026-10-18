@@ -26,11 +26,10 @@ func AgentCommand(w *workspace.Workspace, m workspace.Member, env relay.LaunchEn
 	return ShellCommand(m.Program, agent.LaunchArgs(env))
 }
 
-// Layout places every member's agent and the control panel in the 2×2 grid:
-// each agent in its own slot, the panel in the first slot left over.
+// Layout places every member's agent in its slot of the 2×2 grid and the
+// control panel in the full-width row under it.
 func Layout(w *workspace.Workspace, self, sharedDir string) []Pane {
 	env := relay.LaunchEnv{SharedDir: sharedDir, Self: self}
-	used := map[relay.Slot]bool{}
 	var panes []Pane
 	for _, m := range w.Members {
 		agent := relay.AgentByName(m.Agent)
@@ -39,13 +38,7 @@ func Layout(w *workspace.Workspace, self, sharedDir string) []Pane {
 			title += " ⎇ " + m.Branch
 		}
 		panes = append(panes, Pane{Slot: agent.Slot(), Agent: m.Agent, Title: title, Color: agent.Color(), Dir: m.Dir, Command: AgentCommand(w, m, env)})
-		used[agent.Slot()] = true
 	}
-	for slot := relay.SlotTopLeft; slot <= relay.SlotBottomRight; slot++ {
-		if !used[slot] {
-			panes = append(panes, Pane{Slot: slot, Title: PanelTitle, Color: panelColor, Dir: w.Dir, Command: shellQuote(self) + " panel"})
-			break
-		}
-	}
+	panes = append(panes, Pane{Slot: relay.SlotBottom, Title: PanelTitle, Color: panelColor, Dir: w.Dir, Command: shellQuote(self) + " panel"})
 	return panes
 }

@@ -6,8 +6,8 @@
 ![Claude Squad Screenshot](assets/screenshot.png)
 
 ### Highlights
-- Codex, Claude Code and Gemini side by side in one 2×2 tmux dashboard, with a control panel
-- Ask the other agents from any pane with `@codex`, `@claude`, `@gemini` or `@all`; their answers come back to the asker
+- Codex, Claude Code, Gemini and DeepSeek side by side in one tmux dashboard, with a control panel
+- Ask the other agents from any pane with `@codex`, `@claude`, `@gemini`, `@deepseek` or `@all`; their answers come back to the asker
 - Remaining usage of every account at a glance
 - Each agent gets its own isolated git worktree and branch
 
@@ -47,6 +47,7 @@ curl -fsSL https://raw.githubusercontent.com/smtg-ai/claude-squad/main/install.s
 ### Prerequisites
 
 - [tmux](https://github.com/tmux/tmux/wiki/Installing)
+- For DeepSeek: [Reasonix](https://github.com/esengine/DeepSeek-Reasonix) 2.x on `PATH` (tested with v2.35.0), its key registered by running `reasonix` once, and [bubblewrap](https://github.com/containers/bubblewrap) (`sudo apt install bubblewrap`) so Reasonix can sandbox its shell
 
 ### Usage
 
@@ -58,7 +59,7 @@ Usage:
 Available Commands:
   debug       Print debug information like config paths
   reset       Stop the dashboard and forget the open workspace (worktrees and branches are kept)
-  transcript  Print the conversation of an agent in the open workspace (claude, codex or gemini)
+  transcript  Print the conversation of an agent in the open workspace (claude, codex, gemini, deepseek)
   version     Print the version number
 ```
 
@@ -73,18 +74,19 @@ Run `cs`. A launcher asks where to work:
 
 #### Dashboard
 
-The dashboard is a tmux window on its own server (`tmux -L claudesquad`), split 2×2:
+The dashboard is a tmux window on its own server (`tmux -L claudesquad`): the agents in a 2×2 grid and the control panel in a full-width row under it.
 
 | | |
 |---|---|
-| Codex | control panel |
+| Codex | DeepSeek (Reasonix) |
 | Claude Code | Gemini (Antigravity CLI `agy`) |
+| control panel | |
 
 Click a pane, or move with Shift+arrow keys, to type into it; each agent runs as usual. `C-b z` zooms a pane, `C-b d` detaches and leaves everything running.
 
 The control panel shows:
 
-- **Remaining usage** of each account: Codex's 5-hour and weekly windows from its session logs, Claude Code's from the status line it reports to `cs statusline` (installed per session with `--settings`), and agy's from `agy -p /usage` every 5 minutes. None of these runs a model turn.
+- **Remaining usage** of each account: Codex's 5-hour and weekly windows from its session logs, Claude Code's from the status line it reports to `cs statusline` (installed per session with `--settings`), agy's from `agy -p /usage` every 5 minutes, and DeepSeek's prepaid balance from its [balance API](https://api-docs.deepseek.com/api/get-user-balance) every 5 minutes, with the key in `DEEPSEEK_API_KEY` or the one Reasonix saved in `~/.reasonix/.env`. None of these runs a model turn.
 - **Agents**: working, idle or stopped, with a button to restart each one.
 - **Open a work folder** with the Windows folder dialog (under WSL); the dashboard reopens there.
 - **Broadcast**: a box that types the same prompt into every agent.
@@ -104,7 +106,8 @@ Claude Squad stores its configuration in `~/.claude-squad/config.json`. You can 
   "profiles": [
     { "name": "claude", "program": "claude" },
     { "name": "codex", "program": "codex --search --sandbox read-only --ask-for-approval never" },
-    { "name": "gemini", "program": "agy --dangerously-skip-permissions" }
+    { "name": "gemini", "program": "agy --dangerously-skip-permissions" },
+    { "name": "deepseek", "program": "reasonix" }
   ]
 }
 ```
@@ -115,11 +118,11 @@ Claude Squad stores its configuration in `~/.claude-squad/config.json`. You can 
 | `projects_dir`  | Where the launcher lists repositories and creates new directories           |
 | `profiles`      | Commands the agents run with; the agent is recognized from the executable   |
 
-An agent without a profile runs its executable from `PATH` (`claude`, `codex`, `agy`).
+An agent without a profile runs its executable from `PATH` (`claude`, `codex`, `agy`, `reasonix`).
 
 ### Asking other agents (Relay)
 
-Every agent is told at launch which other agents work alongside it, where their worktrees are, and that `cs transcript <agent>` prints their latest conversation, so a plain "what did Codex change?" works without tags. Claude Code gets this through `--append-system-prompt`, Codex through `-c developer_instructions=…`, and agy through a `GEMINI.md` written into its worktree and kept out of git with `info/exclude` (skipped in a shared directory, or when the repository has its own `GEMINI.md`).
+Every agent is told at launch which other agents work alongside it, where their worktrees are, and that `cs transcript <agent>` prints their latest conversation, so a plain "what did Codex change?" works without tags. Claude Code gets this through `--append-system-prompt`, Codex through `-c developer_instructions=…`, and agy and Reasonix through a `GEMINI.md` and a `REASONIX.local.md` written into their worktrees and kept out of git with `info/exclude` (skipped in a shared directory, or when the repository has its own file of that name).
 
 Start a prompt in an agent's pane with tags to ask the others instead:
 
