@@ -47,7 +47,7 @@ curl -fsSL https://raw.githubusercontent.com/smtg-ai/claude-squad/main/install.s
 ### Prerequisites
 
 - [tmux](https://github.com/tmux/tmux/wiki/Installing)
-- For DeepSeek: [Reasonix](https://github.com/esengine/DeepSeek-Reasonix) 2.x on `PATH` (tested with v2.35.0), its key registered by running `reasonix` once, and [bubblewrap](https://github.com/containers/bubblewrap) (`sudo apt install bubblewrap`) so Reasonix can sandbox its shell
+- For DeepSeek: [Reasonix](https://github.com/esengine/DeepSeek-Reasonix) 2.x on `PATH` (tested with v2.35.0), its key registered by running `reasonix` once, its reasoning set to English with `reasonix config reasoning-language en` (by default DeepSeek is told to reason in Chinese, which often carries over into its answers), and [bubblewrap](https://github.com/containers/bubblewrap) (`sudo apt install bubblewrap`) so Reasonix can sandbox its shell
 
 ### Usage
 
