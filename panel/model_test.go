@@ -72,16 +72,17 @@ func TestViewFitsThePane(t *testing.T) {
 		}
 	}
 	small := newTestModel(t, 60, 13).plain()
-	for _, want := range []string{"⚡自動OFF", "📜ログ", "🚪抜ける", "💥閉じる", compactIdleHint, "🔄再起動"} {
+	for _, want := range []string{"⚡自動OFF", "🚪抜ける", "💥閉じる", compactIdleHint, "🔄再起動"} {
 		require.Contains(t, small, want, "short labels fit a narrow panel")
 	}
 	plain := newTestModel(t, 110, 30).plain()
 	for _, want := range []string{"✦ CLAUDE SQUAD ✦  📂作業フォルダを開く  /repo (git worktree)", "🧠 Claude Code", "🤖 Codex", "💤待機", "まだ取得していません",
-		"🔄再起動", "📣 クリックして全員に一斉送信", "🚀全員に送信", "⚡自動Relay OFF", "📜ログ全文",
+		"🔄再起動", "📣 クリックして全員に一斉送信", "🚀全員に送信", "⚡自動Relay OFF",
 		"🔄使用量", "🚪デタッチ", "💥ワークスペースを閉じる", idleHint} {
 		require.Contains(t, plain, want)
 	}
 	require.Contains(t, newTestModel(t, 140, 30).plain(), keyHelp, "key help shows when it fits")
+	require.Contains(t, newTestModel(t, 110, 4).plain(), "💥ワークスペースを閉じる", "the buttons stay when rows are cut")
 	for _, gone := range []string{"Lv.", "XP", "通算"} {
 		require.NotContains(t, plain, gone)
 	}
@@ -112,7 +113,6 @@ func TestBroadcastIsTypedAndCelebrated(t *testing.T) {
 
 	p.Update(statusTickMsg{})
 	require.Contains(t, p.plain(), "📣 全員に一斉送信！")
-	require.Contains(t, p.plain(), "全員に送信: テスト", "the log shows the broadcast")
 
 	_, cmd = p.Update(key("enter"))
 	require.Nil(t, cmd, "nothing to send")
@@ -122,21 +122,21 @@ func TestBroadcastIsTypedAndCelebrated(t *testing.T) {
 
 func TestEventsShowAsBannersAndDeliveriesToast(t *testing.T) {
 	p := newTestModel(t, 110, 30)
-	p.celebrate(LogEntry{Kind: EventAsk, Agent: relay.AgentClaude, Count: 2, Time: p.now})
+	p.celebrate(LogEntry{Kind: EventAsk, Agent: relay.AgentClaude, Count: 2})
 	require.Contains(t, p.plain(), "📤 🧠 Claude Code が 2人に相談！")
-	p.celebrate(LogEntry{Kind: EventAnswer, Agent: relay.AgentCodex, Time: p.now})
+	p.celebrate(LogEntry{Kind: EventAnswer, Agent: relay.AgentCodex})
 	require.Contains(t, p.plain(), "📥 🤖 Codex が回答！")
 	require.Empty(t, p.toasts, "only deliveries flash on the status line")
-	p.celebrate(LogEntry{Kind: EventDeliver, Agent: relay.AgentClaude, Count: 2, Time: p.now})
+	p.celebrate(LogEntry{Kind: EventDeliver, Agent: relay.AgentClaude, Count: 2})
 	require.Equal(t, []string{"🎉 🧠 Claude Code に意見が届いた！"}, p.toasts)
 	require.Contains(t, p.plain(), "🎉 🧠 Claude Code に意見が届いた！")
 }
 
 func TestWarningsShowWithoutScore(t *testing.T) {
 	p := newTestModel(t, 110, 30)
-	p.celebrate(LogEntry{Kind: EventWarn, Text: "@gemini はこのワークスペースで動いていません", Time: p.now})
+	p.celebrate(LogEntry{Kind: EventWarn, Text: "@gemini はこのワークスペースで動いていません"})
 	require.Contains(t, p.plain(), "🚨 @gemini はこのワークスペースで動いていません")
-	p.celebrate(LogEntry{Kind: EventInfo, Text: "info", Time: p.now})
+	p.celebrate(LogEntry{Kind: EventInfo, Text: "info"})
 	require.Contains(t, p.plain(), "🚨 @gemini", "info does not replace the banner")
 	p.now = p.now.Add(bannerLifetime + time.Second)
 	require.Contains(t, p.plain(), idleHint, "the banner goes away")
@@ -152,6 +152,7 @@ func TestUsageShowsHealthBarsAndIgnoresStaleRefreshes(t *testing.T) {
 	require.NotNil(t, cmd, "the next refresh is scheduled")
 	plain := p.plain()
 	require.Contains(t, plain, "5h ▰▰▰▱▱▱  50% 1h30m")
+	require.Regexp(t, `🤖 Codex +💤待機 +🔄再起動 +5h ▰▰▰▱▱▱  50%`, plain, "state and usage share the agent's row")
 	require.Contains(t, plain, "週 ▰▰▰▰▰▱  90% 2d2h")
 	require.Contains(t, plain, "(3時間前)")
 

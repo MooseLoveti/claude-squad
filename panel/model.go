@@ -30,8 +30,6 @@ const (
 	messageLifetime = 8 * time.Second
 	// bannerLifetime is how long a celebration stays up.
 	bannerLifetime = 6 * time.Second
-	// freshLogLifetime is how long a new log line stays highlighted.
-	freshLogLifetime = 3 * time.Second
 )
 
 type usageState struct {
@@ -340,8 +338,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return m.toggleAutoRelay()
 	case "u":
 		return m.refreshUsage()
-	case "l":
-		return m.openLog()
 	case "d":
 		return m.detach()
 	}
@@ -372,16 +368,6 @@ func (m *Model) toggleAutoRelay() tea.Cmd {
 		m.notice("自動Relay OFF", nil)
 	}
 	return nil
-}
-
-func (m *Model) openLog() tea.Cmd {
-	tmux, dir, file := m.tmux, m.ws.Dir, m.relay.LogFile()
-	return func() tea.Msg {
-		if err := tmux.Popup(dir, "touch "+shellQuote(file)+" && LESSCHARSET=utf-8 less -R +G "+shellQuote(file)); err != nil {
-			return noticeMsg{text: "ログを開けませんでした", err: err}
-		}
-		return nil
-	}
 }
 
 func (m *Model) detach() tea.Cmd {

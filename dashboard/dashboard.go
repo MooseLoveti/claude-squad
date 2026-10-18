@@ -146,6 +146,9 @@ func (t *Tmux) Create(panes []Pane, width, height int, self string) error {
 		_ = t.Kill()
 		return err
 	}
+	if err := t.FitPanel(); err != nil {
+		return err
+	}
 	// Start with the first agent pane selected, ready to type into.
 	for i, p := range ordered {
 		if p.Agent != "" {
@@ -179,8 +182,62 @@ func (t *Tmux) Restyle(panes []Pane, self string) error {
 	return t.configure(self)
 }
 
+// PanelHeight is the control panel's height in rows: the title, a row per
+// agent and one more for usage that wraps, the banner, the broadcast box, a
+// notice and the buttons. The agents get the rest.
+const PanelHeight = 10
+
+// FitPanel gives the control panel PanelHeight rows and splits the rest
+// evenly between the two rows of agents. It runs again whenever a terminal
+// is resized or attaches.
+func (t *Tmux) FitPanel() error {
+	out, err := t.output("list-panes", "-t", Session, "-F",
+		"#{pane_id}\t#{"+agentOption+"}\t#{pane_height}\t#{pane_width}\t#{window_width}")
+	if err != nil {
+		return err
+	}
+	var panel, top, bottom string
+	total := 0
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 5 {
+			continue
+		}
+		height, err := strconv.Atoi(fields[2])
+		if err != nil {
+			continue
+		}
+		switch {
+		case fields[1] == "" && fields[3] != fields[4]:
+			// A dashboard started by an older version has the panel in
+			// the grid; its rows are left alone.
+			return nil
+		case fields[1] == "":
+			panel = fields[0]
+		case relay.AgentByName(fields[1]).Slot() == relay.SlotTopLeft:
+			top = fields[0]
+		case relay.AgentByName(fields[1]).Slot() == relay.SlotBottomLeft:
+			bottom = fields[0]
+		default:
+			continue
+		}
+		total += height
+	}
+	if panel == "" || top == "" || bottom == "" {
+		return errors.New("the dashboard has no panel or left column of agents")
+	}
+	if err := t.run("resize-pane", "-t", panel, "-y", strconv.Itoa(PanelHeight)); err != nil {
+		return err
+	}
+	// The panel's rows went to or came from the agents above it, and the
+	// borders between the rows stay as they are. The top row's size counts
+	// its title line, which pane-border-status puts above it.
+	return t.run("resize-pane", "-t", top, "-y", strconv.Itoa(max((total-PanelHeight)/2, 1)+1))
+}
+
 func (t *Tmux) configure(self string) error {
 	hook := fmt.Sprintf(`run-shell "%s hook enter #{pane_id}"`, shellQuote(self))
+	resized := fmt.Sprintf(`run-shell "%s hook resized"`, shellQuote(self))
 	settings := [][]string{
 		{"set-option", "-g", "mouse", "on"},
 		{"set-option", "-g", "history-limit", "50000"},
@@ -217,6 +274,10 @@ func (t *Tmux) configure(self string) error {
 		{"bind-key", "-n", "S-Right", "select-pane", "-R"},
 		{"bind-key", "-n", "S-Up", "select-pane", "-U"},
 		{"bind-key", "-n", "S-Down", "select-pane", "-D"},
+		// tmux scales the panes with the window, so the panel is fitted
+		// again when a terminal is resized or attaches at another size.
+		{"set-hook", "-g", "client-resized", resized},
+		{"set-hook", "-g", "client-attached", resized},
 	}
 	for _, args := range settings {
 		if err := t.run(args...); err != nil {

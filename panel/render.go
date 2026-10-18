@@ -22,7 +22,7 @@ const (
 
 	broadcastHint   = "クリックして全員に一斉送信"
 	compactIdleHint = "💡 先頭に @codex や @all で相談！"
-	keyHelp         = "i:入力 a:自動Relay u:使用量 l:ログ d:デタッチ"
+	keyHelp         = "i:入力 a:自動Relay u:使用量 d:デタッチ"
 )
 
 // idleHint lists every agent's tag, so a new agent shows up in it.
@@ -33,15 +33,6 @@ var idleHint = func() string {
 	}
 	return "💡 AIのペインで先頭に " + strings.Join(append(tags, "@all"), " / ") + " と書くと相談できる"
 }()
-
-var eventIcons = map[EventKind]string{
-	EventInfo:      "💬",
-	EventWarn:      "🚨",
-	EventAsk:       "📤",
-	EventAnswer:    "📥",
-	EventDeliver:   "🎯",
-	EventBroadcast: "📣",
-}
 
 // compact reports whether the panel is too narrow for the long labels.
 func (m *Model) compact() bool {
@@ -63,15 +54,20 @@ func (m *Model) View() string {
 	s := &screen{width: m.width}
 	m.viewTitle(s)
 	for _, member := range m.members {
-		m.viewUsage(s, member.Agent)
-	}
-	for _, member := range m.members {
-		m.viewAgent(s, member)
+		m.viewMember(s, member)
 	}
 	m.viewBanner(s)
 	m.viewBroadcast(s)
+	// The footer holds the buttons, so it stays when the rows above do not
+	// all fit.
 	footer := m.footer()
-	m.viewLog(s, m.height-len(s.rows)-len(footer))
+	if over := len(s.rows) + len(footer) - m.height; over > 0 {
+		s.rows = s.rows[:max(len(s.rows)-over, 0)]
+	}
+	// The footer sits at the bottom, so its buttons do not move.
+	for len(s.rows)+len(footer) < m.height {
+		s.row()
+	}
 	s.rows = append(s.rows, footer...)
 	view, zones := s.render(m.height)
 	m.zones = zones
@@ -96,9 +92,23 @@ func (m *Model) name(r *row, agent relay.Agent) {
 	r.plain(agent.Emoji()+" ").add(padRight(agent.Label(), nameWidth), fg(agent.Color()).Bold(true))
 }
 
-func (m *Model) viewUsage(s *screen, agent relay.Agent) {
+// viewMember is an agent's row: whether it is working, a restart button, and
+// its account's remaining usage, which may wrap onto a second row.
+func (m *Model) viewMember(s *screen, member Member) {
+	agent := member.Agent
 	r := s.row()
 	m.name(r, agent)
+	spin := spinner[m.frame%len(spinner)]
+	switch {
+	case m.dead[agent]:
+		r.add("💀停止  ", errorStyle)
+	case m.status.Busy[agent]:
+		r.add(spin+" 作業中 ", fg(agent.Color()).Bold(true))
+	default:
+		r.add("💤待機  ", dimStyle)
+	}
+	r.button("🔄再起動", button(agent.Color()), func() tea.Cmd { return m.restart(member) }).plain(" ")
+	indent := r.width
 	state := m.usage[agent]
 	switch {
 	case state == nil:
@@ -109,7 +119,7 @@ func (m *Model) viewUsage(s *screen, agent relay.Agent) {
 	default:
 		for i, w := range state.usage.Windows {
 			if i > 0 && i%2 == 0 {
-				r = s.row().plain(padRight("", nameWidth+3))
+				r = s.row().plain(padRight("", indent))
 			}
 			r.add(w.Name+" ", dimStyle).raw(hpBar(w.Remaining, hpCells))
 			pct := fg(hpColor(w.Remaining)).Bold(true)
@@ -138,22 +148,6 @@ func (m *Model) viewUsage(s *screen, agent relay.Agent) {
 	}
 }
 
-func (m *Model) viewAgent(s *screen, member Member) {
-	agent := member.Agent
-	r := s.row()
-	m.name(r, agent)
-	spin := spinner[m.frame%len(spinner)]
-	switch {
-	case m.dead[agent]:
-		r.add("💀停止  ", errorStyle)
-	case m.status.Busy[agent]:
-		r.add(spin+" 作業中 ", fg(agent.Color()).Bold(true))
-	default:
-		r.add("💤待機  ", dimStyle)
-	}
-	r.button("🔄再起動", button(agent.Color()), func() tea.Cmd { return m.restart(member) })
-}
-
 func (m *Model) viewBanner(s *screen) {
 	r := s.row()
 	switch {
@@ -179,40 +173,6 @@ func (m *Model) viewBroadcast(s *screen) {
 		r.add(padRight(broadcastHint, max(m.width-r.width-lipgloss.Width(send)-4, 0)), dimStyle)
 	}
 	r.plain(" ").button(send, button(accent), m.broadcast)
-}
-
-func (m *Model) viewLog(s *screen, rows int) {
-	if rows <= 0 {
-		return
-	}
-	var lines []*row
-	for _, p := range m.status.Pending {
-		lines = append(lines, (&row{}).add("⏳ "+p, fg(gold)))
-	}
-	entries := m.status.Log
-	if n := rows - len(lines); n < len(entries) {
-		entries = entries[max(len(entries)-n, 0):]
-	}
-	for _, e := range entries {
-		style := lipgloss.NewStyle()
-		switch e.Kind {
-		case EventWarn:
-			style = fg(hot)
-		case EventDeliver:
-			style = fg(mint)
-		}
-		if m.now.Sub(e.Time) < freshLogLifetime {
-			style = style.Bold(true).Foreground(lipgloss.Color(gold))
-		}
-		lines = append(lines, (&row{}).plain(eventIcons[e.Kind]+" ").add(e.Time.Format("15:04")+" ", dimStyle).add(e.Text, style))
-	}
-	if len(lines) > rows {
-		lines = lines[len(lines)-rows:]
-	}
-	s.rows = append(s.rows, lines...)
-	for i := len(lines); i < rows; i++ {
-		s.row()
-	}
 }
 
 // footer is the notice line, when there is a notice, and the button line.
@@ -256,7 +216,6 @@ func (m *Model) footer() []*row {
 			autoStyle = button(gold)
 		}
 		r.button(auto, autoStyle, m.toggleAutoRelay)
-		r.button(m.label("📜ログ全文", "📜ログ"), button(cyan), m.openLog)
 		r.button(m.label("🔄使用量", "🔄"), button(mint), m.refreshUsage)
 		r.button(m.label("🚪デタッチ", "🚪抜ける"), button(mint), m.detach)
 		r.button(m.label("💥ワークスペースを閉じる", "💥閉じる"), button(hot), func() tea.Cmd { m.closing = true; return nil })

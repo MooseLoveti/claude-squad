@@ -207,9 +207,6 @@ func TestTaggedQuestionGoesToTheRecipientAndTheAnswerComesBack(t *testing.T) {
 		texts = append(texts, e.Text)
 	}
 	require.Equal(t, []string{"Claude Code → Codex: ここどう思う？", "Codex が回答しました", "Claude Code に回答を返しました"}, texts)
-	logFile, err := os.ReadFile(f.relay.LogFile())
-	require.NoError(t, err)
-	require.Contains(t, string(logFile), "=== Codex へ ===\n[Claude Codeからの相談", "the full prompt is logged")
 }
 
 func TestAllWaitsForEveryRecipient(t *testing.T) {

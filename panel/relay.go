@@ -46,16 +46,14 @@ const (
 	EventBroadcast
 )
 
-// LogEntry is one line of the relay log; Detail holds the full text sent.
-// Seq numbers entries from 1, so readers can tell which ones are new.
+// LogEntry is a relay event, which the panel announces in its banner. Seq
+// numbers entries from 1, so readers can tell which ones are new.
 type LogEntry struct {
-	Seq    int
-	Kind   EventKind
-	Agent  relay.Agent
-	Count  int
-	Time   time.Time
-	Text   string
-	Detail string
+	Seq   int
+	Kind  EventKind
+	Agent relay.Agent
+	Count int
+	Text  string
 }
 
 const (
@@ -127,7 +125,6 @@ type Relay struct {
 	term          Terminal
 	members       []Member
 	transcriptDir string
-	logFile       string
 	now           func() time.Time
 	settle        time.Duration
 
@@ -147,15 +144,13 @@ type Relay struct {
 	dismissedAt map[relay.Agent]time.Time
 }
 
-// NewRelay sets up a relay over members. Transcripts and the full relay log
-// are written under configDir.
+// NewRelay sets up a relay over members. Transcripts are written under
+// configDir.
 func NewRelay(term Terminal, members []Member, configDir string) *Relay {
-	dir := filepath.Join(configDir, "relay")
 	return &Relay{
 		term:          term,
 		members:       members,
-		transcriptDir: dir,
-		logFile:       filepath.Join(dir, "log.txt"),
+		transcriptDir: filepath.Join(configDir, "relay"),
 		now:           time.Now,
 		settle:        pasteSettle,
 		busy:          map[relay.Agent]bool{},
@@ -165,11 +160,6 @@ func NewRelay(term Terminal, members []Member, configDir string) *Relay {
 		autoCandidate: map[relay.Agent][sha256.Size]byte{},
 		dismissedAt:   map[relay.Agent]time.Time{},
 	}
-}
-
-// LogFile is where every relay message is written in full.
-func (r *Relay) LogFile() string {
-	return r.logFile
 }
 
 func (r *Relay) member(pane string) (Member, bool) {
@@ -268,7 +258,6 @@ func (r *Relay) startAsk(source Member, destinations []Member, question string, 
 	from := r.sender(source)
 	a := &ask{asker: source, question: question, fromUser: fromUser}
 	labels := make([]string, len(destinations))
-	var detail strings.Builder
 	for i, d := range destinations {
 		labels[i] = d.Agent.Label()
 		var also []relay.Agent
@@ -279,11 +268,10 @@ func (r *Relay) startAsk(source Member, destinations []Member, question string, 
 		}
 		prompt := relay.Question{From: from, FromUser: fromUser, To: d.Agent, ToDir: d.Dir, AlsoAsked: also, Text: question}.Format()
 		a.consults = append(a.consults, &consult{to: d, prompt: prompt})
-		fmt.Fprintf(&detail, "=== %s へ ===\n%s\n\n", d.Agent.Label(), prompt)
 	}
 	r.asks = append(r.asks, a)
 	r.addLog(LogEntry{Kind: EventAsk, Agent: source.Agent, Count: len(destinations),
-		Text: fmt.Sprintf("%s → %s: %s", source.Agent.Label(), strings.Join(labels, "・"), oneLine(question)), Detail: detail.String()})
+		Text: fmt.Sprintf("%s → %s: %s", source.Agent.Label(), strings.Join(labels, "・"), oneLine(question))})
 }
 
 // sender describes the asker for the recipients, writing its transcript
@@ -315,7 +303,7 @@ func (r *Relay) Broadcast(text string) {
 			r.warn(fmt.Sprintf("%s に送れませんでした: %v", m.Agent.Label(), err))
 		}
 	}
-	r.addLog(LogEntry{Kind: EventBroadcast, Count: len(r.members), Text: "全員に送信: " + oneLine(text), Detail: text})
+	r.addLog(LogEntry{Kind: EventBroadcast, Count: len(r.members), Text: "全員に送信: " + oneLine(text)})
 }
 
 // submit pastes text into a pane and presses Enter.
@@ -441,7 +429,7 @@ func (r *Relay) collect(c *consult) {
 	c.state, c.answer = consultAnswered, reply
 	// The answer is not a new message to scan for tags.
 	r.autoSeen[c.to.Agent] = id
-	r.addLog(LogEntry{Kind: EventAnswer, Agent: c.to.Agent, Text: c.to.Agent.Label() + " が回答しました", Detail: reply})
+	r.addLog(LogEntry{Kind: EventAnswer, Agent: c.to.Agent, Text: c.to.Agent.Label() + " が回答しました"})
 }
 
 // deliver types the combined answers into the asker's session and reports
@@ -454,13 +442,13 @@ func (r *Relay) deliver(a *ask) bool {
 	message := relay.FormatAnswers(a.question, a.fromUser, answers)
 	if err := r.submit(a.asker, message); err != nil {
 		if !a.deliveryFailed {
-			r.addLog(LogEntry{Kind: EventWarn, Text: fmt.Sprintf("%s に回答を返せませんでした（再試行します）: %v", a.asker.Agent.Label(), err), Detail: message})
+			r.addLog(LogEntry{Kind: EventWarn, Text: fmt.Sprintf("%s に回答を返せませんでした（再試行します）: %v", a.asker.Agent.Label(), err)})
 		}
 		a.deliveryFailed = true
 		return false
 	}
 	r.busy[a.asker.Agent] = true
-	r.addLog(LogEntry{Kind: EventDeliver, Agent: a.asker.Agent, Count: len(a.consults), Text: a.asker.Agent.Label() + " に回答を返しました", Detail: message})
+	r.addLog(LogEntry{Kind: EventDeliver, Agent: a.asker.Agent, Count: len(a.consults), Text: a.asker.Agent.Label() + " に回答を返しました"})
 	return true
 }
 
@@ -572,38 +560,17 @@ func (r *Relay) warn(text string) {
 
 func (r *Relay) addLog(entry LogEntry) {
 	r.seq++
-	entry.Seq, entry.Time = r.seq, r.now()
+	entry.Seq = r.seq
 	r.log = append(r.log, entry)
 	if len(r.log) > logLimit {
 		r.log = r.log[len(r.log)-logLimit:]
 	}
-	if err := r.appendLogFile(entry); err != nil {
-		log.WarningLog.Printf("write relay log: %v", err)
-	}
-}
-
-func (r *Relay) appendLogFile(entry LogEntry) error {
-	if err := os.MkdirAll(filepath.Dir(r.logFile), 0o755); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(r.logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	text := fmt.Sprintf("[%s] %s\n", entry.Time.Format("01-02 15:04:05"), entry.Text)
-	if entry.Detail != "" {
-		text += strings.TrimRight(entry.Detail, "\n") + "\n"
-	}
-	_, err = f.WriteString(text + "\n")
-	return err
 }
 
 // Status is what the panel shows about the relay.
 type Status struct {
 	Log       []LogEntry
 	Busy      map[relay.Agent]bool
-	Pending   []string
 	AutoRelay bool
 	AutoCount int
 }
@@ -620,9 +587,6 @@ func (r *Relay) Status() Status {
 	}
 	for agent, busy := range r.busy {
 		s.Busy[agent] = busy
-	}
-	for _, a := range r.asks {
-		s.Pending = append(s.Pending, a.asker.Agent.Label()+" "+askNote(a))
 	}
 	return s
 }

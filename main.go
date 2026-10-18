@@ -49,15 +49,19 @@ var (
 	}
 
 	hookCmd = &cobra.Command{
-		Use:    "hook enter <pane>",
-		Short:  "Handle Enter typed on an agent pane (called by tmux)",
+		Use:    "hook enter <pane> | hook resized",
+		Short:  "Handle Enter typed on an agent pane, or a resized dashboard (called by tmux)",
 		Hidden: true,
-		Args:   cobra.ExactArgs(2),
+		Args:   cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			log.Initialize("[hook] ")
 			defer log.Close()
-			if args[0] != "enter" {
-				return fmt.Errorf("unknown hook %q", args[0])
+			tmux := dashboard.New(cmd2.MakeExecutor())
+			if len(args) == 1 && args[0] == "resized" {
+				return tmux.FitPanel()
+			}
+			if len(args) != 2 || args[0] != "enter" {
+				return fmt.Errorf("unknown hook %q", args)
 			}
 			pane := args[1]
 			configDir, err := config.GetConfigDir()
@@ -65,7 +69,7 @@ var (
 				return nil
 			}
 			// No panel took it: Enter does what it always does.
-			return dashboard.New(cmd2.MakeExecutor()).SendKeys(pane, "Enter")
+			return tmux.SendKeys(pane, "Enter")
 		},
 	}
 

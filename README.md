@@ -86,16 +86,15 @@ Click a pane, or move with Shift+arrow keys, to type into it; each agent runs as
 
 The dashboard answers a few launch screens itself: Codex's Daybreak security reminder and its update offer are skipped (updating is left to you), and every agent's question whether to trust a new worktree is answered yes, pressing Enter only once the trust choice is selected. Trusted, Reasonix runs DeepSeek's edits and commands without asking while its OS sandbox keeps writes inside its worktree. A question to an agent waits while one of these screens shows.
 
-The control panel shows:
+The control panel is a fixed 10-row strip, so the agents get the rest of the height; it is fitted again whenever the terminal is resized. It shows:
 
-- **Remaining usage** of each account: Codex's 5-hour and weekly windows from its session logs, Claude Code's from the status line it reports to `cs statusline` (installed per session with `--settings`), agy's from `agy -p /usage` every 5 minutes, and DeepSeek's prepaid balance from its [balance API](https://api-docs.deepseek.com/api/get-user-balance) every 5 minutes, with the key in `DEEPSEEK_API_KEY` or the one Reasonix saved in `~/.reasonix/.env`. None of these runs a model turn.
-- **Agents**: working, idle or stopped, with a button to restart each one.
+- **Each agent** on one row: working, idle or stopped, a button to restart it, and the remaining usage of its account: Codex's 5-hour and weekly windows from its session logs, Claude Code's from the status line it reports to `cs statusline` (installed per session with `--settings`), agy's from `agy -p /usage` every 5 minutes, and DeepSeek's prepaid balance from its [balance API](https://api-docs.deepseek.com/api/get-user-balance) every 5 minutes, with the key in `DEEPSEEK_API_KEY` or the one Reasonix saved in `~/.reasonix/.env`. None of these runs a model turn.
 - **Open a work folder** with the Windows folder dialog (under WSL); the dashboard reopens there.
 - **Broadcast**: a box that types the same prompt into every agent.
-- **Relay** log, auto relay toggle, and the full log (`~/.claude-squad/relay/log.txt`).
+- **Auto relay** toggle. Relay events show briefly in the banner, and each pane's title shows the progress of its questions.
 - **Close workspace** stops every agent and removes the worktrees, keeping their branches. Worktrees with uncommitted changes are kept.
 
-Keys in the panel: `i` broadcast box, `a` auto relay, `u` refresh usage, `l` full log, `d` detach.
+Keys in the panel: `i` broadcast box, `a` auto relay, `u` refresh usage, `d` detach.
 
 ### Configuration
 

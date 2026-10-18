@@ -72,8 +72,12 @@ func testPanes() []Pane {
 	}
 }
 
+// tiledPanes lists five panes the way tmux tiles them in 220×59 before the
+// panel is fitted: rows of 18, 19 and 19 under their title lines.
+const tiledPanes = "%1\tcodex\t18\t109\t220\n%2\tdeepseek\t18\t110\t220\n%3\tclaude\t19\t109\t220\n%4\tgemini\t19\t110\t220\n%5\t\t19\t220\t220\n"
+
 func TestCreateLaysOutPanesBySlot(t *testing.T) {
-	rec := &recorder{}
+	rec := &recorder{listOut: tiledPanes}
 	tmux := &Tmux{exec: rec.exec(), socket: Socket}
 	require.NoError(t, tmux.Create(testPanes(), 200, 50, "/bin/cs"))
 
@@ -99,7 +103,28 @@ func TestCreateLaysOutPanesBySlot(t *testing.T) {
 	require.Contains(t, cmds, "set-option -g pane-border-lines heavy")
 	require.Contains(t, cmds, "bind-key -n S-Left select-pane -L")
 	require.Contains(t, cmds, "bind-key -n S-Down select-pane -D")
+	require.Contains(t, cmds, `set-hook -g client-resized run-shell "'/bin/cs' hook resized"`)
+	require.Contains(t, cmds, `set-hook -g client-attached run-shell "'/bin/cs' hook resized"`)
+	require.Equal(t, []string{"resize-pane -t %5 -y 10", "resize-pane -t %1 -y 24"}, cmds[len(cmds)-3:len(cmds)-1],
+		"the panel gets its rows and the agents split the other 46 evenly, the top size counting its title line")
 	require.Equal(t, "select-pane -t %1", cmds[len(cmds)-1], "the first agent pane starts selected")
+}
+
+func TestFitPanel(t *testing.T) {
+	rec := &recorder{listOut: "%1\tcodex\t30\t109\t220\n%3\tclaude\t13\t109\t220\n%5\t\t6\t220\t220\n"}
+	tmux := &Tmux{exec: rec.exec(), socket: Socket}
+	require.NoError(t, tmux.FitPanel())
+	require.Equal(t, []string{"resize-pane -t %5 -y 10", "resize-pane -t %1 -y 20"}, rec.commands()[1:],
+		"a too short panel takes rows back from the agents")
+
+	old := &recorder{listOut: "%1\tcodex\t28\t109\t220\n%2\t\t28\t110\t220\n%3\tclaude\t29\t109\t220\n"}
+	tmux = &Tmux{exec: old.exec(), socket: Socket}
+	require.NoError(t, tmux.FitPanel())
+	require.Len(t, old.commands(), 1, "a panel inside the grid is left alone")
+
+	empty := &recorder{listOut: ""}
+	tmux = &Tmux{exec: empty.exec(), socket: Socket}
+	require.Error(t, tmux.FitPanel())
 }
 
 func TestCreateCleansUpWhenASplitFails(t *testing.T) {
