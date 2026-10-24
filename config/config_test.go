@@ -17,7 +17,7 @@ func TestMain(m *testing.M) {
 
 func TestLoadConfigCreatesTheDefault(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cs", ConfigFileName)
-	cfg := loadConfigFrom(path)
+	cfg := LoadConfigFrom(path)
 	require.NotEmpty(t, cfg.BranchPrefix)
 	require.FileExists(t, path)
 }
@@ -25,12 +25,12 @@ func TestLoadConfigCreatesTheDefault(t *testing.T) {
 func TestLoadConfigReadsProfilesAndKeepsDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ConfigFileName)
 	require.NoError(t, os.WriteFile(path, []byte(`{"profiles":[{"name":"codex","program":"codex --search"}],"auto_yes":true}`), 0o644))
-	cfg := loadConfigFrom(path)
+	cfg := LoadConfigFrom(path)
 	require.Equal(t, []Profile{{Name: "codex", Program: "codex --search"}}, cfg.Profiles)
 	require.NotEmpty(t, cfg.BranchPrefix, "unset fields keep their defaults; unknown ones are ignored")
 
 	require.NoError(t, os.WriteFile(path, []byte("{"), 0o644))
-	require.Empty(t, loadConfigFrom(path).Profiles, "a broken file falls back to the default")
+	require.Empty(t, LoadConfigFrom(path).Profiles, "a broken file falls back to the default")
 }
 
 func TestProjectsAndExpandHome(t *testing.T) {
