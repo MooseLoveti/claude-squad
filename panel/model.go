@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -381,10 +382,23 @@ func (m *Model) detach() tea.Cmd {
 }
 
 func (m *Model) restart(member Member) tea.Cmd {
-	ws, tmux, env := m.ws, m.tmux, m.env
+	// The command is looked up again, so edits to config.json since the
+	// dashboard started take effect.
+	cfg := config.LoadConfigFrom(filepath.Join(m.configDir, config.ConfigFileName))
+	program := workspace.ProgramFor(cfg, member.Agent)
+	for i := range m.ws.Members {
+		if m.ws.Members[i].Agent == member.Agent.Name() {
+			m.ws.Members[i].Program = program
+		}
+	}
+	if err := workspace.Save(m.state, m.ws); err != nil {
+		log.WarningLog.Printf("save workspace: %v", err)
+	}
+	wm, _ := m.ws.Member(member.Agent.Name())
+	command := dashboard.AgentCommand(m.ws, wm, m.env)
+	tmux := m.tmux
 	return func() tea.Msg {
-		wm, _ := ws.Member(member.Agent.Name())
-		if err := tmux.Respawn(member.Pane, wm.Dir, dashboard.AgentCommand(ws, wm, env)); err != nil {
+		if err := tmux.Respawn(member.Pane, wm.Dir, command); err != nil {
 			return noticeMsg{text: member.Agent.Label() + " を再起動できませんでした", err: err}
 		}
 		return noticeMsg{text: "🔄 " + member.Agent.Label() + " を再起動しました"}

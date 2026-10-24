@@ -81,10 +81,11 @@ func LoadConfig() *Config {
 		log.ErrorLog.Printf("failed to get config directory: %v", err)
 		return DefaultConfig()
 	}
-	return loadConfigFrom(filepath.Join(configDir, ConfigFileName))
+	return LoadConfigFrom(filepath.Join(configDir, ConfigFileName))
 }
 
-func loadConfigFrom(path string) *Config {
+// LoadConfigFrom loads the config kept at path.
+func LoadConfigFrom(path string) *Config {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
