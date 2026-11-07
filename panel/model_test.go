@@ -9,6 +9,7 @@ import (
 	"claude-squad/workspace"
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -336,4 +337,30 @@ func key(s string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyEsc}
 	}
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+}
+
+func TestRestartUsesTheCurrentConfig(t *testing.T) {
+	p := newTestModel(t, 110, 30)
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	p.state = config.LoadStateFrom(statePath)
+	cfg := `{"profiles":[{"name":"codex","program":"/opt/codex --dangerously-bypass-approvals-and-sandbox"}]}`
+	require.NoError(t, os.WriteFile(filepath.Join(p.configDir, config.ConfigFileName), []byte(cfg), 0o644))
+	var ran []string
+	p.tmux = dashboard.New(cmd_test.MockCmdExec{
+		RunFunc:    func(c *exec.Cmd) error { ran = append(ran, strings.Join(c.Args[3:], " ")); return nil },
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) { return nil, nil },
+	})
+
+	p.Update(p.restart(codexMember)())
+	require.Len(t, ran, 1)
+	require.Contains(t, ran[0], "respawn-pane")
+	require.Contains(t, ran[0], "/opt/codex --dangerously-bypass-approvals-and-sandbox")
+	require.Contains(t, p.plain(), "Codex を再起動しました")
+
+	saved, err := workspace.Load(config.LoadStateFrom(statePath))
+	require.NoError(t, err)
+	codex, _ := saved.Member("codex")
+	require.Equal(t, "/opt/codex --dangerously-bypass-approvals-and-sandbox", codex.Program, "the saved workspace follows")
+	claude, _ := saved.Member("claude")
+	require.Equal(t, "claude", claude.Program, "other agents keep their command until they restart")
 }
